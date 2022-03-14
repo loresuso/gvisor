@@ -16,12 +16,15 @@ package control
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/fd"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/fs/user"
+	"gvisor.dev/gvisor/pkg/sentry/fsimpl/gofer"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/limits"
@@ -41,6 +44,10 @@ type Lifecycle struct {
 	// containers, create the mount namespace using the mount spec in
 	// the StartContainerArgs.
 	MountNamespaceVFS2 *vfs.MountNamespace
+	NumContainers      int32
+	containersStarted  int32
+
+	MountNamespacesMap map[string]*vfs.MountNamespace
 }
 
 // StartContainerArgs is the set of arguments to start a container.
@@ -81,6 +88,24 @@ type StartContainerArgs struct {
 
 	// Limits is the limit set for the process being executed.
 	Limits *limits.LimitSet `json:"limits"`
+
+	// MountRootConf is the root mount.
+	MountRootConf SentryMount
+
+	// SubMountConf contains the submounts.
+	SubMountConf []SentryMount
+
+	// MountFd is the fd which should be used to mount.
+	// TODO: Move this inside SentryMount.
+	MountFd int
+
+	ContainerName string
+}
+
+// SentryMount contains the mount config for the container.
+type SentryMount struct {
+	Target string
+	FsType string
 }
 
 // String prints the StartContainerArgs.argv as a string.
@@ -94,6 +119,33 @@ func (args StartContainerArgs) String() string {
 		a[0] = args.Filename
 	}
 	return strings.Join(a, " ")
+}
+
+func (l *Lifecycle) createNewMountNamespace(ctx context.Context, creds *auth.Credentials, fsType string, fd int, submounts []SentryMount) (*vfs.MountNamespace, error) {
+	data := []string{
+		"trans=fd",
+		"rfdno=" + strconv.Itoa(fd),
+		"wfdno=" + strconv.Itoa(fd),
+	}
+
+	opts := &vfs.MountOptions{
+		ReadOnly: true,
+		GetFilesystemOptions: vfs.GetFilesystemOptions{
+			Data: strings.Join(data, ","),
+			InternalData: gofer.InternalFilesystemOptions{
+				UniqueID: "/",
+			},
+		},
+		InternalMount: true,
+	}
+	rootCreds := auth.NewRootCredentials(creds.UserNamespace)
+	mns, err := l.Kernel.VFS().NewMountNamespace(ctx, rootCreds, "", fsType, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to construct MountNamespace: %v", err)
+	}
+
+	// TODO: Mount submounts.
+	return mns, nil
 }
 
 // StartContainer will start a new container in the sandbox.
@@ -133,6 +185,13 @@ func (l *Lifecycle) StartContainer(args *StartContainerArgs, _ *uint32) error {
 	ctx := initArgs.NewContext(l.Kernel)
 	defer fdTable.DecRef(ctx)
 
+	if kernel.VFS2Enabled {
+		initArgs.MountNamespaceVFS2 = l.MountNamespacesMap[initArgs.ContainerID]
+		log.Infof("mntsMap: %+v ", l.MountNamespacesMap)
+		log.Infof("mnts: %+v container_id: %v", initArgs.MountNamespaceVFS2, initArgs.ContainerID)
+		initArgs.MountNamespaceVFS2.IncRef()
+	}
+
 	resolved, err := user.ResolveExecutablePath(ctx, &initArgs)
 	if err != nil {
 		return err
@@ -156,10 +215,11 @@ func (l *Lifecycle) StartContainer(args *StartContainerArgs, _ *uint32) error {
 
 	// Start the newly created process.
 	l.Kernel.StartProcess(tg)
-
-	log.Infof("Started the new container")
-
-	l.StartedCh <- struct{}{}
+	log.Infof("Started the new container %v %v", l.containersStarted, l.NumContainers)
+	l.containersStarted++
+	if l.NumContainers == l.containersStarted {
+		l.StartedCh <- struct{}{}
+	}
 	return nil
 }
 

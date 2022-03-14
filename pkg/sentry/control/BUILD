@@ -35,6 +35,7 @@ go_library(
         "//pkg/sentry/fs",
         "//pkg/sentry/fs/host",
         "//pkg/sentry/fs/user",
+        "//pkg/sentry/fsimpl/gofer",
         "//pkg/sentry/fsimpl/host",
         "//pkg/sentry/fsmetric",
         "//pkg/sentry/kernel",
