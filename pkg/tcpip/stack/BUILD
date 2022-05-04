@@ -157,6 +157,7 @@ go_test(
     library = ":stack",
     deps = [
         "//pkg/atomicbitops",
+        "//pkg/buffer",
         "//pkg/sync",
         "//pkg/tcpip",
         "//pkg/tcpip/buffer",
