@@ -11,6 +11,7 @@ go_test(
         "multicast_group_test.go",
     ],
     deps = [
+        "//pkg/buffer",
         "//pkg/refs",
         "//pkg/refsvfs2",
         "//pkg/sync",
@@ -23,6 +24,7 @@ go_test(
         "//pkg/tcpip/link/loopback",
         "//pkg/tcpip/network/ipv4",
         "//pkg/tcpip/network/ipv6",
+        "//pkg/tcpip/prependable",
         "//pkg/tcpip/stack",
         "//pkg/tcpip/testutil",
         "//pkg/tcpip/transport/icmp",

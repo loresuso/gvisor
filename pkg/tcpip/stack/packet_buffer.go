@@ -119,7 +119,7 @@ type PacketBuffer struct {
 
 	// buf is the underlying buffer for the packet. See struct level docs for
 	// details.
-	buf      buffer.Buffer
+	buf      buffer.Buffer `state:".([]byte)"`
 	reserved int
 	pushed   int
 	consumed int
@@ -277,7 +277,7 @@ func (pk *PacketBuffer) Size() int {
 // MemSize returns the estimation size of the pk in memory, including backing
 // buffer data.
 func (pk *PacketBuffer) MemSize() int {
-	return int(pk.buf.Size()) + packetBufferStructSize
+	return int(pk.buf.Size()) + PacketBufferStructSize
 }
 
 // Data returns the handle to data portion of pk.
@@ -390,6 +390,16 @@ func (pk *PacketBuffer) Clone() *PacketBuffer {
 	newPk.tuple = pk.tuple
 	newPk.InitRefs()
 	return newPk
+}
+
+// ReserveHeaderBytes prepends reserved space for headers at the front
+// of the underlying buf. Can only be called once per packet.
+func (pk *PacketBuffer) ReserveHeaderBytes(reserved int) {
+	if pk.reserved != 0 {
+		panic(fmt.Sprintf("ReserveHeaderBytes(...) called on packet with reserved=%d, want reserved=0", pk.reserved))
+	}
+	pk.reserved = reserved
+	pk.buf.PrependOwned(make([]byte, reserved))
 }
 
 // Network returns the network header as a header.Network.
@@ -625,6 +635,64 @@ func (d PacketData) ReadFromVV(srcVV *tcpipbuffer.VectorisedView, count int) int
 	return done
 }
 
+// ReadFromBuffer moves at most count bytes from the beginning of src to the end
+// of d and returns the number of bytes moved.
+func (d PacketData) ReadFromBuffer(src *buffer.Buffer, count int) int {
+	toRead := int64(count)
+	if toRead > src.Size() {
+		toRead = src.Size()
+	}
+	clone := src.Clone()
+	clone.Truncate(toRead)
+	d.pk.buf.Merge(&clone)
+	src.TrimFront(toRead)
+	return int(toRead)
+}
+
+// AppendRange appends and takes ownership of the data in r.
+func (d PacketData) AppendRange(r Range) {
+	r.iterate(func(b []byte) {
+		d.pk.buf.AppendOwned(b)
+	})
+}
+
+// Merge clears headers in oth and merges its data with d.
+func (d PacketData) Merge(oth PacketData) {
+	oth.pk.buf.TrimFront(int64(oth.pk.dataOffset()))
+	d.pk.buf.Merge(&oth.pk.buf)
+}
+
+// ReadFrom moves at most count bytes from the beginning of src to the end
+// of d.
+func (d PacketData) ReadFrom(src PacketData, count int) {
+	done := 0
+	for _, v := range src.Views() {
+		if len(v) < count {
+			count -= len(v)
+			done += len(v)
+			// Use AppendOwned to avoid the cost of copying data between buffers.
+			// This is safe because the buffers are trimmed out of src at the end
+			// of the function anyways.
+			d.pk.buf.AppendOwned(v)
+		} else {
+			v = v[:count]
+			count -= len(v)
+			done += len(v)
+			d.pk.buf.Append(v)
+			break
+		}
+	}
+	src.TrimFront(done)
+}
+
+// TrimFront removes up to count bytes from the front of d's payload.
+func (d PacketData) TrimFront(count int) {
+	if count > d.Size() {
+		count = d.Size()
+	}
+	d.pk.buf.Remove(d.pk.dataOffset(), count)
+}
+
 // Size returns the number of bytes in the data payload of the packet.
 func (d PacketData) Size() int {
 	return int(d.pk.buf.Size()) - d.pk.dataOffset()
@@ -716,7 +784,7 @@ func (r Range) AsView() tcpipbuffer.View {
 }
 
 // ToOwnedView returns a owned copy of data in r.
-func (r Range) ToOwnedView() tcpipbuffer.View {
+func (r Range) ToOwnedView() []byte {
 	if r.length == 0 {
 		return nil
 	}
