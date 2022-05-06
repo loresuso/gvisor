@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"gvisor.dev/gvisor/pkg/refsvfs2"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -138,14 +139,116 @@ func TestExcludeBroadcast(t *testing.T) {
 	})
 }
 
+func TestAddMulticastRouteIPv4Errors(t *testing.T) {
+	const (
+		defaultIncomingNICID = 1
+		defaultOutgoingNICID = 2
+	)
+
+	incomingEpAddr := tcpip.AddressWithPrefix{
+		Address:   tcpip.Address(net.ParseIP("10.0.0.2").To4()),
+		PrefixLen: 8,
+	}
+	outgoingEpAddr := tcpip.AddressWithPrefix{
+		Address:   tcpip.Address(net.ParseIP("10.0.0.3").To4()),
+		PrefixLen: 8,
+	}
+	multicastAddr := testutil.MustParse4("225.0.0.0")
+
+	endpointConfigs := map[tcpip.NICID]tcpip.AddressWithPrefix{
+		defaultIncomingNICID: incomingEpAddr,
+		defaultOutgoingNICID: outgoingEpAddr,
+	}
+
+	tests := []struct {
+		name    string
+		srcAddr tcpip.Address
+		wantErr tcpip.Error
+	}{
+		{
+			name:    "source matches endpoint",
+			srcAddr: incomingEpAddr.Address,
+			wantErr: &tcpip.ErrBadAddress{},
+		},
+		{
+			name:    "broadcast source",
+			srcAddr: header.IPv4Broadcast,
+			wantErr: &tcpip.ErrBadAddress{},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := newTestContext()
+			defer ctx.cleanup()
+			s := ctx.s
+
+			for nicID, addr := range endpointConfigs {
+				ep := channel.New(1, ipv4.MaxTotalSize, "")
+				defer ep.Close()
+
+				if err := s.CreateNIC(nicID, ep); err != nil {
+					t.Fatalf("s.CreateNIC(%d, _): %s", nicID, err)
+				}
+				addr := tcpip.ProtocolAddress{
+					Protocol:          header.IPv4ProtocolNumber,
+					AddressWithPrefix: addr,
+				}
+				if err := s.AddProtocolAddress(nicID, addr, stack.AddressProperties{}); err != nil {
+					t.Fatalf("s.AddProtocolAddress(%d, %+v, {}): %s", nicID, addr, err)
+				}
+			}
+
+			outgoingInterfaces := []stack.OutgoingInterface{{ID: defaultOutgoingNICID, MinTTL: 1}}
+
+			addresses := stack.UnicastSourceAndMulticastDestination{
+				Source:      test.srcAddr,
+				Destination: multicastAddr,
+			}
+			route := stack.MulticastRoute{
+				ExpectedInputInterface: defaultIncomingNICID,
+				OutgoingInterfaces:     outgoingInterfaces,
+			}
+
+			err := s.AddMulticastRoute(ipv4.ProtocolNumber, addresses, route)
+
+			if !cmp.Equal(err, test.wantErr, cmpopts.EquateErrors()) {
+				t.Errorf("got s.AddMulticastRoute(%d, %#v, %#v) = %s, want %s", ipv4.ProtocolNumber, addresses, route, err, test.wantErr)
+			}
+		})
+	}
+}
+
+// TestForwarding tests the shared aspects of unicast and multicast forwarding.
 func TestForwarding(t *testing.T) {
 	const (
-		incomingNICID    = 1
-		outgoingNICID    = 2
-		randomSequence   = 123
-		randomIdent      = 42
-		randomTimeOffset = 0x10203040
+		incomingNICID        = 1
+		outgoingNICID        = 2
+		randomSequence       = 123
+		randomIdent          = 42
+		randomTimeOffset     = 0x10203040
+		multicastRouteMinTTL = 1
 	)
+
+	type dstAddrType string
+
+	const (
+		unicastAddrType   dstAddrType = "unicast"
+		multicastAddrType dstAddrType = "multicast"
+	)
+
+	type invalidAddrType int
+
+	const (
+		none invalidAddrType = iota
+		linkLocalAddr
+		unreachableAddr
+	)
+
+	type endpointConfig struct {
+		address     tcpip.AddressWithPrefix
+		linkAddress tcpip.LinkAddress
+	}
 
 	incomingIPv4Addr := tcpip.AddressWithPrefix{
 		Address:   tcpip.Address(net.ParseIP("10.0.0.1").To4()),
@@ -160,14 +263,21 @@ func TestForwarding(t *testing.T) {
 	remoteIPv4Addr2 := testutil.MustParse4("11.0.0.2")
 	unreachableIPv4Addr := testutil.MustParse4("12.0.0.2")
 	multicastIPv4Addr := testutil.MustParse4("225.0.0.0")
+	unreachableMulticastIPv4Addr := testutil.MustParse4("225.0.0.1")
 	linkLocalIPv4Addr := testutil.MustParse4("169.254.0.0")
+	linkLocalMulitcastIPv4Addr := testutil.MustParse4("224.0.0.1")
+
+	endpointConfigs := map[tcpip.NICID]endpointConfig{
+		incomingNICID: {incomingIPv4Addr, ""},
+		outgoingNICID: {outgoingIPv4Addr, outgoingLinkAddr},
+	}
 
 	tests := []struct {
 		name                         string
 		TTL                          uint8
 		sourceAddr                   tcpip.Address
-		destAddr                     tcpip.Address
-		expectErrorICMP              bool
+		invalidDstAddrType           invalidAddrType
+		expectErrorICMPForUnicast    bool
 		ipFlags                      uint8
 		mtu                          uint32
 		payloadLength                int
@@ -179,23 +289,23 @@ func TestForwarding(t *testing.T) {
 		expectLinkLocalSourceError   bool
 		expectLinkLocalDestError     bool
 		expectPacketForwarded        bool
+		wantAddMulticastRouteErr     tcpip.Error
 		expectedFragmentsForwarded   []fragmentInfo
 	}{
 		{
-			name:            "TTL of zero",
-			TTL:             0,
-			sourceAddr:      remoteIPv4Addr1,
-			destAddr:        remoteIPv4Addr2,
-			expectErrorICMP: true,
-			icmpType:        header.ICMPv4TimeExceeded,
-			icmpCode:        header.ICMPv4TTLExceeded,
-			mtu:             ipv4.MaxTotalSize,
+			name: "TTL of zero",
+			// For multicast, this value is less than multicastRouteMinTTL.
+			TTL:                       0,
+			sourceAddr:                remoteIPv4Addr1,
+			expectErrorICMPForUnicast: true,
+			icmpType:                  header.ICMPv4TimeExceeded,
+			icmpCode:                  header.ICMPv4TTLExceeded,
+			mtu:                       ipv4.MaxTotalSize,
 		},
 		{
 			name:                  "TTL of one",
 			TTL:                   1,
 			sourceAddr:            remoteIPv4Addr1,
-			destAddr:              remoteIPv4Addr2,
 			expectPacketForwarded: true,
 			mtu:                   ipv4.MaxTotalSize,
 		},
@@ -203,7 +313,6 @@ func TestForwarding(t *testing.T) {
 			name:                  "TTL of two",
 			TTL:                   2,
 			sourceAddr:            remoteIPv4Addr1,
-			destAddr:              remoteIPv4Addr2,
 			expectPacketForwarded: true,
 			mtu:                   ipv4.MaxTotalSize,
 		},
@@ -211,7 +320,6 @@ func TestForwarding(t *testing.T) {
 			name:                  "Max TTL",
 			TTL:                   math.MaxUint8,
 			sourceAddr:            remoteIPv4Addr1,
-			destAddr:              remoteIPv4Addr2,
 			expectPacketForwarded: true,
 			mtu:                   ipv4.MaxTotalSize,
 		},
@@ -219,7 +327,6 @@ func TestForwarding(t *testing.T) {
 			name:                  "four EOL options",
 			TTL:                   2,
 			sourceAddr:            remoteIPv4Addr1,
-			destAddr:              remoteIPv4Addr2,
 			expectPacketForwarded: true,
 			mtu:                   ipv4.MaxTotalSize,
 			options:               header.IPv4Options{0, 0, 0, 0},
@@ -229,22 +336,20 @@ func TestForwarding(t *testing.T) {
 			name:       "TS type 1 full",
 			TTL:        2,
 			sourceAddr: remoteIPv4Addr1,
-			destAddr:   remoteIPv4Addr2,
 			mtu:        ipv4.MaxTotalSize,
 			options: header.IPv4Options{
 				68, 12, 13, 0xF1,
 				192, 168, 1, 12,
 				1, 2, 3, 4,
 			},
-			expectErrorICMP: true,
-			icmpType:        header.ICMPv4ParamProblem,
-			icmpCode:        header.ICMPv4UnusedCode,
+			expectErrorICMPForUnicast: true,
+			icmpType:                  header.ICMPv4ParamProblem,
+			icmpCode:                  header.ICMPv4UnusedCode,
 		},
 		{
 			name:       "TS type 0",
 			TTL:        2,
 			sourceAddr: remoteIPv4Addr1,
-			destAddr:   remoteIPv4Addr2,
 			mtu:        ipv4.MaxTotalSize,
 			options: header.IPv4Options{
 				68, 24, 21, 0x00,
@@ -268,7 +373,6 @@ func TestForwarding(t *testing.T) {
 			name:       "end of options list",
 			TTL:        2,
 			sourceAddr: remoteIPv4Addr1,
-			destAddr:   remoteIPv4Addr2,
 			mtu:        ipv4.MaxTotalSize,
 			options: header.IPv4Options{
 				68, 12, 13, 0x11,
@@ -291,38 +395,31 @@ func TestForwarding(t *testing.T) {
 			name:                         "Network unreachable",
 			TTL:                          2,
 			sourceAddr:                   remoteIPv4Addr1,
-			destAddr:                     unreachableIPv4Addr,
-			expectErrorICMP:              true,
+			invalidDstAddrType:           unreachableAddr,
+			expectErrorICMPForUnicast:    true,
 			mtu:                          ipv4.MaxTotalSize,
 			icmpType:                     header.ICMPv4DstUnreachable,
 			icmpCode:                     header.ICMPv4NetUnreachable,
 			expectPacketUnrouteableError: true,
 		},
 		{
-			name:                         "Multicast destination",
-			TTL:                          2,
-			destAddr:                     multicastIPv4Addr,
-			expectPacketUnrouteableError: true,
-		},
-		{
 			name:                     "Link local destination",
 			TTL:                      2,
 			sourceAddr:               remoteIPv4Addr1,
-			destAddr:                 linkLocalIPv4Addr,
+			invalidDstAddrType:       linkLocalAddr,
 			expectLinkLocalDestError: true,
 		},
 		{
 			name:                       "Link local source",
 			TTL:                        2,
 			sourceAddr:                 linkLocalIPv4Addr,
-			destAddr:                   remoteIPv4Addr2,
+			wantAddMulticastRouteErr:   &tcpip.ErrBadAddress{},
 			expectLinkLocalSourceError: true,
 		},
 		{
 			name:       "Fragmentation needed and DF set",
 			TTL:        2,
 			sourceAddr: remoteIPv4Addr1,
-			destAddr:   remoteIPv4Addr2,
 			ipFlags:    header.IPv4FlagDontFragment,
 			// We've picked this MTU because it is:
 			//
@@ -338,17 +435,16 @@ func TestForwarding(t *testing.T) {
 			//
 			// 2) Less than `ipv4.MaxTotalSize`, which lets us build an IPv4 packet whose
 			// size exceeds the MTU.
-			mtu:             1000,
-			payloadLength:   1004,
-			expectErrorICMP: true,
-			icmpType:        header.ICMPv4DstUnreachable,
-			icmpCode:        header.ICMPv4FragmentationNeeded,
+			mtu:                       1000,
+			payloadLength:             1004,
+			expectErrorICMPForUnicast: true,
+			icmpType:                  header.ICMPv4DstUnreachable,
+			icmpCode:                  header.ICMPv4FragmentationNeeded,
 		},
 		{
 			name:                  "Fragmentation needed and DF not set",
 			TTL:                   2,
 			sourceAddr:            remoteIPv4Addr1,
-			destAddr:              remoteIPv4Addr2,
 			mtu:                   1000,
 			payloadLength:         1004,
 			expectPacketForwarded: true,
@@ -365,216 +461,265 @@ func TestForwarding(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			ctx := newTestContext()
-			defer ctx.cleanup()
-			s := ctx.s
-			clock := ctx.clock
+		for _, dstAddrType := range []dstAddrType{unicastAddrType, multicastAddrType} {
+			t.Run(fmt.Sprintf("%s %s", test.name, dstAddrType), func(t *testing.T) {
+				ctx := newTestContext()
+				defer ctx.cleanup()
+				s := ctx.s
+				clock := ctx.clock
 
-			// Advance the clock by some unimportant amount to make
-			// it give a more recognisable signature than 00,00,00,00.
-			clock.Advance(time.Millisecond * randomTimeOffset)
+				// Advance the clock by some unimportant amount to make
+				// it give a more recognisable signature than 00,00,00,00.
+				clock.Advance(time.Millisecond * randomTimeOffset)
 
-			// We expect at most a single packet in response to our ICMP Echo Request.
-			incomingEndpoint := channel.New(1, test.mtu, "")
-			defer incomingEndpoint.Close()
-			if err := s.CreateNIC(incomingNICID, incomingEndpoint); err != nil {
-				t.Fatalf("CreateNIC(%d, _): %s", incomingNICID, err)
-			}
-			incomingIPv4ProtoAddr := tcpip.ProtocolAddress{Protocol: header.IPv4ProtocolNumber, AddressWithPrefix: incomingIPv4Addr}
-			if err := s.AddProtocolAddress(incomingNICID, incomingIPv4ProtoAddr, stack.AddressProperties{}); err != nil {
-				t.Fatalf("AddProtocolAddress(%d, %+v, {}): %s", incomingNICID, incomingIPv4ProtoAddr, err)
-			}
+				endpoints := make(map[tcpip.NICID]*channel.Endpoint)
+				for nicID, config := range endpointConfigs {
+					// For the input interface, we expect at most a single packet in
+					// response to our ICMP Echo Request.
+					expectedEmittedPacketCount := 1
 
-			expectedEmittedPacketCount := 1
-			if len(test.expectedFragmentsForwarded) > expectedEmittedPacketCount {
-				expectedEmittedPacketCount = len(test.expectedFragmentsForwarded)
-			}
-			outgoingEndpoint := channel.New(expectedEmittedPacketCount, test.mtu, outgoingLinkAddr)
-			defer outgoingEndpoint.Close()
-			if err := s.CreateNIC(outgoingNICID, outgoingEndpoint); err != nil {
-				t.Fatalf("CreateNIC(%d, _): %s", outgoingNICID, err)
-			}
-			outgoingIPv4ProtoAddr := tcpip.ProtocolAddress{Protocol: header.IPv4ProtocolNumber, AddressWithPrefix: outgoingIPv4Addr}
-			if err := s.AddProtocolAddress(outgoingNICID, outgoingIPv4ProtoAddr, stack.AddressProperties{}); err != nil {
-				t.Fatalf("AddProtocolAddress(%d, %+v, {}): %s", outgoingNICID, outgoingIPv4ProtoAddr, err)
-			}
-
-			s.SetRouteTable([]tcpip.Route{
-				{
-					Destination: incomingIPv4Addr.Subnet(),
-					NIC:         incomingNICID,
-				},
-				{
-					Destination: outgoingIPv4Addr.Subnet(),
-					NIC:         outgoingNICID,
-				},
-			})
-
-			if err := s.SetForwardingDefaultAndAllNICs(header.IPv4ProtocolNumber, true); err != nil {
-				t.Fatalf("SetForwardingDefaultAndAllNICs(%d, true): %s", header.IPv4ProtocolNumber, err)
-			}
-
-			ipHeaderLength := header.IPv4MinimumSize + len(test.options)
-			if ipHeaderLength > header.IPv4MaximumHeaderSize {
-				t.Fatalf("got ipHeaderLength = %d, want <= %d ", ipHeaderLength, header.IPv4MaximumHeaderSize)
-			}
-			icmpHeaderLength := header.ICMPv4MinimumSize
-			totalLength := ipHeaderLength + icmpHeaderLength + test.payloadLength
-			hdr := buffer.NewPrependable(totalLength)
-			hdr.Prepend(test.payloadLength)
-			icmpH := header.ICMPv4(hdr.Prepend(icmpHeaderLength))
-			icmpH.SetIdent(randomIdent)
-			icmpH.SetSequence(randomSequence)
-			icmpH.SetType(header.ICMPv4Echo)
-			icmpH.SetCode(header.ICMPv4UnusedCode)
-			icmpH.SetChecksum(0)
-			icmpH.SetChecksum(^header.Checksum(icmpH, 0))
-			ip := header.IPv4(hdr.Prepend(ipHeaderLength))
-			ip.Encode(&header.IPv4Fields{
-				TotalLength: uint16(totalLength),
-				Protocol:    uint8(header.ICMPv4ProtocolNumber),
-				TTL:         test.TTL,
-				SrcAddr:     test.sourceAddr,
-				DstAddr:     test.destAddr,
-				Flags:       test.ipFlags,
-			})
-			if len(test.options) != 0 {
-				ip.SetHeaderLength(uint8(ipHeaderLength))
-				// Copy options manually. We do not use Encode for options so we can
-				// verify malformed options with handcrafted payloads.
-				if want, got := copy(ip.Options(), test.options), len(test.options); want != got {
-					t.Fatalf("got copy(ip.Options(), test.options) = %d, want = %d", got, want)
-				}
-			}
-			ip.SetChecksum(0)
-			ip.SetChecksum(^ip.CalculateChecksum())
-			requestPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Data: hdr.View().ToVectorisedView(),
-			})
-			defer requestPkt.DecRef()
-			requestPkt.NetworkProtocolNumber = header.IPv4ProtocolNumber
-			incomingEndpoint.InjectInbound(header.IPv4ProtocolNumber, requestPkt)
-			reply := incomingEndpoint.Read()
-
-			if test.expectErrorICMP {
-				if reply == nil {
-					t.Fatalf("expected ICMP packet type %d through incoming NIC", test.icmpType)
-				}
-
-				// We expect the ICMP packet to contain as much of the original packet as
-				// possible up to a limit of 576 bytes, split between payload, IP header,
-				// and ICMP header.
-				expectedICMPPayloadLength := func() int {
-					maxICMPPacketLength := header.IPv4MinimumProcessableDatagramSize
-					maxICMPPayloadLength := maxICMPPacketLength - icmpHeaderLength - ipHeaderLength
-					if len(hdr.View()) > maxICMPPayloadLength {
-						return maxICMPPayloadLength
+					if nicID == outgoingNICID && len(test.expectedFragmentsForwarded) > expectedEmittedPacketCount {
+						expectedEmittedPacketCount = len(test.expectedFragmentsForwarded)
 					}
-					return len(hdr.View())
+
+					ep := channel.New(expectedEmittedPacketCount, test.mtu, "")
+					defer ep.Close()
+
+					if err := s.CreateNIC(nicID, ep); err != nil {
+						t.Fatalf("s.CreateNIC(%d, _): %s", nicID, err)
+					}
+					addr := tcpip.ProtocolAddress{Protocol: header.IPv4ProtocolNumber, AddressWithPrefix: config.address}
+					if err := s.AddProtocolAddress(nicID, addr, stack.AddressProperties{}); err != nil {
+						t.Fatalf("s.AddProtocolAddress(%d, %+v, {}): %s", nicID, addr, err)
+					}
+
+					s.SetNICMulticastForwarding(nicID, ipv4.ProtocolNumber, true /* enabled */)
+					endpoints[nicID] = ep
 				}
 
-				checker.IPv4(t, stack.PayloadSince(reply.NetworkHeader()),
-					checker.SrcAddr(incomingIPv4Addr.Address),
-					checker.DstAddr(test.sourceAddr),
-					checker.TTL(ipv4.DefaultTTL),
-					checker.ICMPv4(
-						checker.ICMPv4Checksum(),
-						checker.ICMPv4Type(test.icmpType),
-						checker.ICMPv4Code(test.icmpCode),
-						checker.ICMPv4Payload(hdr.View()[:expectedICMPPayloadLength()]),
-					),
-				)
-				reply.DecRef()
-			} else if reply != nil {
-				t.Fatalf("expected no ICMP packet through incoming NIC, instead found: %#v", reply)
-			}
+				s.SetRouteTable([]tcpip.Route{
+					{
+						Destination: incomingIPv4Addr.Subnet(),
+						NIC:         incomingNICID,
+					},
+					{
+						Destination: outgoingIPv4Addr.Subnet(),
+						NIC:         outgoingNICID,
+					},
+				})
 
-			if test.expectPacketForwarded {
-				if len(test.expectedFragmentsForwarded) != 0 {
-					var fragmentedPackets []*stack.PacketBuffer
-					for i := 0; i < len(test.expectedFragmentsForwarded); i++ {
-						reply := outgoingEndpoint.Read()
-						if reply == nil {
-							t.Fatal("expected ICMP Echo fragment through outgoing NIC")
+				outgoingInterfaces := []stack.OutgoingInterface{
+					{ID: outgoingNICID, MinTTL: multicastRouteMinTTL},
+				}
+				addresses := stack.UnicastSourceAndMulticastDestination{
+					Source:      test.sourceAddr,
+					Destination: multicastIPv4Addr,
+				}
+				route := stack.MulticastRoute{
+					ExpectedInputInterface: incomingNICID,
+					OutgoingInterfaces:     outgoingInterfaces,
+				}
+
+				if err := s.AddMulticastRoute(ipv4.ProtocolNumber, addresses, route); !cmp.Equal(err, test.wantAddMulticastRouteErr, cmpopts.EquateErrors()) {
+					t.Errorf("got AddMulticastRoute(%d, %#v, %#v) = %s, want = %s", ipv4.ProtocolNumber, addresses, route, err, test.wantAddMulticastRouteErr)
+				}
+
+				if err := s.SetForwardingDefaultAndAllNICs(header.IPv4ProtocolNumber, true); err != nil {
+					t.Fatalf("SetForwardingDefaultAndAllNICs(%d, true): %s", header.IPv4ProtocolNumber, err)
+				}
+
+				dstAddr := func() tcpip.Address {
+					switch test.invalidDstAddrType {
+					case linkLocalAddr:
+						if dstAddrType == unicastAddrType {
+							return linkLocalIPv4Addr
 						}
-						fragmentedPackets = append(fragmentedPackets, reply)
+						return linkLocalMulitcastIPv4Addr
+					case unreachableAddr:
+						if dstAddrType == unicastAddrType {
+							return unreachableIPv4Addr
+						}
+						return unreachableMulticastIPv4Addr
+					default:
+						if dstAddrType == unicastAddrType {
+							return remoteIPv4Addr2
+						}
+						return multicastIPv4Addr
 					}
+				}()
 
-					// The forwarded packet's TTL will have been decremented.
-					ipHeader := header.IPv4(requestPkt.NetworkHeader().View())
-					ipHeader.SetTTL(ipHeader.TTL() - 1)
+				ipHeaderLength := header.IPv4MinimumSize + len(test.options)
+				if ipHeaderLength > header.IPv4MaximumHeaderSize {
+					t.Fatalf("got ipHeaderLength = %d, want <= %d ", ipHeaderLength, header.IPv4MaximumHeaderSize)
+				}
+				icmpHeaderLength := header.ICMPv4MinimumSize
+				totalLength := ipHeaderLength + icmpHeaderLength + test.payloadLength
+				hdr := buffer.NewPrependable(totalLength)
+				hdr.Prepend(test.payloadLength)
+				icmpH := header.ICMPv4(hdr.Prepend(icmpHeaderLength))
+				icmpH.SetIdent(randomIdent)
+				icmpH.SetSequence(randomSequence)
+				icmpH.SetType(header.ICMPv4Echo)
+				icmpH.SetCode(header.ICMPv4UnusedCode)
+				icmpH.SetChecksum(0)
+				icmpH.SetChecksum(^header.Checksum(icmpH, 0))
+				ip := header.IPv4(hdr.Prepend(ipHeaderLength))
+				ip.Encode(&header.IPv4Fields{
+					TotalLength: uint16(totalLength),
+					Protocol:    uint8(header.ICMPv4ProtocolNumber),
+					TTL:         test.TTL,
+					SrcAddr:     test.sourceAddr,
+					DstAddr:     dstAddr,
+					Flags:       test.ipFlags,
+				})
+				if len(test.options) != 0 {
+					ip.SetHeaderLength(uint8(ipHeaderLength))
+					// Copy options manually. We do not use Encode for options so we can
+					// verify malformed options with handcrafted payloads.
+					if want, got := copy(ip.Options(), test.options), len(test.options); want != got {
+						t.Fatalf("got copy(ip.Options(), test.options) = %d, want = %d", got, want)
+					}
+				}
+				ip.SetChecksum(0)
+				ip.SetChecksum(^ip.CalculateChecksum())
+				requestPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+					Data: hdr.View().ToVectorisedView(),
+				})
+				defer requestPkt.DecRef()
+				requestPkt.NetworkProtocolNumber = header.IPv4ProtocolNumber
+				incomingEndpoint, ok := endpoints[incomingNICID]
+				if !ok {
+					t.Fatalf("got endpoints[%d] = (_, false), want (_, true)", incomingNICID)
+				}
+				incomingEndpoint.InjectInbound(header.IPv4ProtocolNumber, requestPkt)
+				reply := incomingEndpoint.Read()
 
-					// Forwarded packets have available header bytes equalling the sum of the
-					// maximum IP header size and the maximum size allocated for link layer
-					// headers. In this case, no size is allocated for link layer headers.
-					expectedAvailableHeaderBytes := header.IPv4MaximumHeaderSize
-					if err := compareFragments(fragmentedPackets, requestPkt, test.mtu, test.expectedFragmentsForwarded, header.ICMPv4ProtocolNumber, true /* withIPHeader */, expectedAvailableHeaderBytes); err != nil {
-						t.Error(err)
-					}
-					for _, pkt := range fragmentedPackets {
-						pkt.DecRef()
-					}
-				} else {
-					reply := outgoingEndpoint.Read()
+				// ICMP error messages are not send for multicast destinations.
+				if test.expectErrorICMPForUnicast && dstAddrType != multicastAddrType {
 					if reply == nil {
-						t.Fatal("expected ICMP Echo packet through outgoing NIC")
+						t.Fatalf("expected ICMP packet type %d through incoming NIC", test.icmpType)
+					}
+
+					// We expect the ICMP packet to contain as much of the original packet as
+					// possible up to a limit of 576 bytes, split between payload, IP header,
+					// and ICMP header.
+					expectedICMPPayloadLength := func() int {
+						maxICMPPacketLength := header.IPv4MinimumProcessableDatagramSize
+						maxICMPPayloadLength := maxICMPPacketLength - icmpHeaderLength - ipHeaderLength
+						if len(hdr.View()) > maxICMPPayloadLength {
+							return maxICMPPayloadLength
+						}
+						return len(hdr.View())
 					}
 
 					checker.IPv4(t, stack.PayloadSince(reply.NetworkHeader()),
-						checker.SrcAddr(test.sourceAddr),
-						checker.DstAddr(test.destAddr),
-						checker.TTL(test.TTL-1),
-						checker.IPv4Options(test.forwardedOptions),
+						checker.SrcAddr(incomingIPv4Addr.Address),
+						checker.DstAddr(test.sourceAddr),
+						checker.TTL(ipv4.DefaultTTL),
 						checker.ICMPv4(
 							checker.ICMPv4Checksum(),
-							checker.ICMPv4Type(header.ICMPv4Echo),
-							checker.ICMPv4Code(header.ICMPv4UnusedCode),
-							checker.ICMPv4Payload(nil),
+							checker.ICMPv4Type(test.icmpType),
+							checker.ICMPv4Code(test.icmpCode),
+							checker.ICMPv4Payload(hdr.View()[:expectedICMPPayloadLength()]),
 						),
 					)
 					reply.DecRef()
+				} else if reply != nil {
+					t.Fatalf("expected no ICMP packet through incoming NIC, instead found: %#v", reply)
 				}
-			} else {
-				if reply := outgoingEndpoint.Read(); reply != nil {
-					t.Fatalf("expected no ICMP Echo packet through outgoing NIC, instead found: %#v", reply)
+
+				outgoingEndpoint, ok := endpoints[outgoingNICID]
+				if !ok {
+					t.Fatalf("got endpoints[%d] = (_, false), want (_, true)", outgoingNICID)
 				}
-			}
-			boolToInt := func(val bool) uint64 {
-				if val {
-					return 1
+
+				if test.expectPacketForwarded {
+					if len(test.expectedFragmentsForwarded) != 0 {
+						var fragmentedPackets []*stack.PacketBuffer
+						for i := 0; i < len(test.expectedFragmentsForwarded); i++ {
+							reply := outgoingEndpoint.Read()
+							if reply == nil {
+								t.Fatal("expected ICMP Echo fragment through outgoing NIC")
+							}
+							fragmentedPackets = append(fragmentedPackets, reply)
+						}
+
+						// The forwarded packet's TTL will have been decremented.
+						ipHeader := header.IPv4(requestPkt.NetworkHeader().View())
+						ipHeader.SetTTL(ipHeader.TTL() - 1)
+
+						// Forwarded packets have available header bytes equalling the sum of the
+						// maximum IP header size and the maximum size allocated for link layer
+						// headers. In this case, no size is allocated for link layer headers.
+						expectedAvailableHeaderBytes := header.IPv4MaximumHeaderSize
+						if err := compareFragments(fragmentedPackets, requestPkt, test.mtu, test.expectedFragmentsForwarded, header.ICMPv4ProtocolNumber, true /* withIPHeader */, expectedAvailableHeaderBytes); err != nil {
+							t.Error(err)
+						}
+						for _, pkt := range fragmentedPackets {
+							pkt.DecRef()
+						}
+					} else {
+						reply := outgoingEndpoint.Read()
+						if reply == nil {
+							t.Fatal("expected ICMP Echo packet through outgoing NIC")
+						}
+
+						checker.IPv4(t, stack.PayloadSince(reply.NetworkHeader()),
+							checker.SrcAddr(test.sourceAddr),
+							checker.DstAddr(dstAddr),
+							checker.TTL(test.TTL-1),
+							checker.IPv4Options(test.forwardedOptions),
+							checker.ICMPv4(
+								checker.ICMPv4Checksum(),
+								checker.ICMPv4Type(header.ICMPv4Echo),
+								checker.ICMPv4Code(header.ICMPv4UnusedCode),
+								checker.ICMPv4Payload(nil),
+							),
+						)
+						reply.DecRef()
+					}
+				} else {
+					if reply := outgoingEndpoint.Read(); reply != nil {
+						t.Fatalf("expected no ICMP Echo packet through outgoing NIC, instead found: %#v", reply)
+					}
 				}
-				return 0
-			}
 
-			if got, want := s.Stats().IP.Forwarding.LinkLocalSource.Value(), boolToInt(test.expectLinkLocalSourceError); got != want {
-				t.Errorf("got s.Stats().IP.Forwarding.LinkLocalSource.Value() = %d, want = %d", got, want)
-			}
+				boolToInt := func(val bool) uint64 {
+					if val {
+						return 1
+					}
+					return 0
+				}
 
-			if got, want := s.Stats().IP.Forwarding.LinkLocalDestination.Value(), boolToInt(test.expectLinkLocalDestError); got != want {
-				t.Errorf("got s.Stats().IP.Forwarding.LinkLocalDestination.Value() = %d, want = %d", got, want)
-			}
+				if got, want := s.Stats().IP.Forwarding.LinkLocalSource.Value(), boolToInt(test.expectLinkLocalSourceError); got != want {
+					t.Errorf("got s.Stats().IP.Forwarding.LinkLocalSource.Value() = %d, want = %d", got, want)
+				}
 
-			if got, want := s.Stats().IP.MalformedPacketsReceived.Value(), boolToInt(test.icmpType == header.ICMPv4ParamProblem); got != want {
-				t.Errorf("got s.Stats().IP.MalformedPacketsReceived.Value() = %d, want = %d", got, want)
-			}
+				if got, want := s.Stats().IP.Forwarding.LinkLocalDestination.Value(), boolToInt(test.expectLinkLocalDestError); got != want {
+					t.Errorf("got s.Stats().IP.Forwarding.LinkLocalDestination.Value() = %d, want = %d", got, want)
+				}
 
-			if got, want := s.Stats().IP.Forwarding.ExhaustedTTL.Value(), boolToInt(test.TTL <= 0); got != want {
-				t.Errorf("got s.Stats().IP.Forwarding.ExhaustedTTL.Value() = %d, want = %d", got, want)
-			}
+				if got, want := s.Stats().IP.MalformedPacketsReceived.Value(), boolToInt(test.icmpType == header.ICMPv4ParamProblem); got != want {
+					t.Errorf("got s.Stats().IP.MalformedPacketsReceived.Value() = %d, want = %d", got, want)
+				}
 
-			if got, want := s.Stats().IP.Forwarding.Unrouteable.Value(), boolToInt(test.expectPacketUnrouteableError); got != want {
-				t.Errorf("got s.Stats().IP.Forwarding.Unrouteable.Value() = %d, want = %d", got, want)
-			}
+				if got, want := s.Stats().IP.Forwarding.ExhaustedTTL.Value(), boolToInt(test.TTL <= 0); got != want {
+					t.Errorf("got s.Stats().IP.Forwarding.ExhaustedTTL.Value() = %d, want = %d", got, want)
+				}
 
-			if got, want := s.Stats().IP.Forwarding.Errors.Value(), boolToInt(!test.expectPacketForwarded); got != want {
-				t.Errorf("got s.Stats().IP.Forwarding.Errors.Value() = %d, want = %d", got, want)
-			}
+				if got, want := s.Stats().IP.Forwarding.Unrouteable.Value(), boolToInt(test.expectPacketUnrouteableError); got != want {
+					t.Errorf("got s.Stats().IP.Forwarding.Unrouteable.Value() = %d, want = %d", got, want)
+				}
 
-			if got, want := s.Stats().IP.Forwarding.PacketTooBig.Value(), boolToInt(test.icmpCode == header.ICMPv4FragmentationNeeded); got != want {
-				t.Errorf("got s.Stats().IP.Forwarding.PacketTooBig.Value() = %d, want = %d", got, want)
-			}
-		})
+				if got, want := s.Stats().IP.Forwarding.Errors.Value(), boolToInt(!test.expectPacketForwarded); got != want {
+					t.Errorf("got s.Stats().IP.Forwarding.Errors.Value() = %d, want = %d", got, want)
+				}
+
+				if got, want := s.Stats().IP.Forwarding.PacketTooBig.Value(), boolToInt(test.icmpCode == header.ICMPv4FragmentationNeeded); got != want {
+					t.Errorf("got s.Stats().IP.Forwarding.PacketTooBig.Value() = %d, want = %d", got, want)
+				}
+			})
+		}
 	}
 }
 

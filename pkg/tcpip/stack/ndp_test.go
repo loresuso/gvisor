@@ -1748,6 +1748,22 @@ func TestPrefixDiscoveryWithInfiniteLifetime(t *testing.T) {
 		Clock: clock,
 	})
 
+	ipv6Protocol := s.NetworkProtocolInstance(ipv6.ProtocolNumber)
+
+	if ipv6Protocol == nil {
+		t.Fatalf("s.NetworkProtocolInstance(%d): nil", ipv6.ProtocolNumber)
+	}
+
+	forwardingNetProto, ok := ipv6Protocol.(stack.MulticastForwardingNetworkProtocol)
+	if !ok {
+		t.Fatalf("ipv6Protocol.(stack.MulticastForwardingNetworkProtocol): (_, false)")
+	}
+
+	// Disable the multicast cleanup routine that is run repeatedly. If this
+	// repeated task is not disabled, then advancing the timer infinitely would
+	// block forever.
+	forwardingNetProto.DisableMulticastCleanupRoutineForTesting()
+
 	if err := s.CreateNIC(1, e); err != nil {
 		t.Fatalf("CreateNIC(1) = %s", err)
 	}

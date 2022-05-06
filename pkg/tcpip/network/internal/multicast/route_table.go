@@ -235,6 +235,13 @@ func (r *RouteTable) Init(config Config) error {
 	return nil
 }
 
+// DisableCleanupRoutineForTesting stops the pending routes cleanup routine.
+//
+// This should only be invoked for testing purposes.
+func (r *RouteTable) DisableCleanupRoutineForTesting() {
+	r.cleanupPendingRoutesTimer.Stop()
+}
+
 // Close cleans up resources held by the table.
 //
 // Calling this will stop the cleanup routine and release any packets owned by
@@ -275,7 +282,11 @@ func (r *RouteTable) newPendingRoute() PendingRoute {
 }
 
 // NewInstalledRoute instatiates an installed route for the table.
-func (r *RouteTable) NewInstalledRoute(inputInterface tcpip.NICID, outgoingInterfaces []OutgoingInterface) *InstalledRoute {
+func (r *RouteTable) NewInstalledRoute(inputInterface tcpip.NICID, stackOutgoingInterfaces []stack.OutgoingInterface) *InstalledRoute {
+	outgoingInterfaces := make([]OutgoingInterface, len(stackOutgoingInterfaces))
+	for i, outgoingInterface := range stackOutgoingInterfaces {
+		outgoingInterfaces[i] = OutgoingInterface{ID: outgoingInterface.ID, MinTTL: outgoingInterface.MinTTL}
+	}
 	return &InstalledRoute{
 		expectedInputInterface: inputInterface,
 		outgoingInterfaces:     outgoingInterfaces,
@@ -334,15 +345,14 @@ func (e PendingRouteState) String() string {
 // in a pending route. The GetRouteResult.PendingRouteState will indicate
 // whether the pkt was queued in a new pending route or an existing one.
 //
-// If the relevant pending route queue is at max capacity, then
-// ErrNoBufferSpace is returned. In such a case, callers are typically expected
-// to only deliver the pkt locally (if relevant).
-func (r *RouteTable) GetRouteOrInsertPending(key RouteKey, pkt *stack.PacketBuffer) (GetRouteResult, error) {
+// If the relevant pending route queue is at max capacity, then false is
+// returned. Otherwise, returns true.
+func (r *RouteTable) GetRouteOrInsertPending(key RouteKey, pkt *stack.PacketBuffer) (GetRouteResult, bool) {
 	r.installedMu.RLock()
 	defer r.installedMu.RUnlock()
 
 	if route, ok := r.installedRoutes[key]; ok {
-		return GetRouteResult{PendingRouteState: PendingRouteStateNone, InstalledRoute: route}, nil
+		return GetRouteResult{PendingRouteState: PendingRouteStateNone, InstalledRoute: route}, true
 	}
 
 	r.pendingMu.Lock()
@@ -353,12 +363,12 @@ func (r *RouteTable) GetRouteOrInsertPending(key RouteKey, pkt *stack.PacketBuff
 		// The incoming packet is rejected if the pending queue is already at max
 		// capacity. This behavior matches the Linux implementation:
 		// https://github.com/torvalds/linux/blob/ae085d7f936/net/ipv4/ipmr.c#L1147
-		return GetRouteResult{}, ErrNoBufferSpace
+		return GetRouteResult{}, false
 	}
 	pendingRoute.packets = append(pendingRoute.packets, pkt.Clone())
 	r.pendingRoutes[key] = pendingRoute
 
-	return GetRouteResult{PendingRouteState: pendingRouteState, InstalledRoute: nil}, nil
+	return GetRouteResult{PendingRouteState: pendingRouteState, InstalledRoute: nil}, true
 }
 
 // +checklocks:r.pendingMu

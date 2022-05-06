@@ -39,7 +39,7 @@ const (
 // Example shows how to interact with a multicast RouteTable.
 func Example() {
 	address := testutil.MustParse4("192.168.1.1")
-	defaultOutgoingInterfaces := []multicast.OutgoingInterface{{ID: outgoingNICID, MinTTL: defaultMinTTL}}
+	defaultOutgoingInterfaces := []stack.OutgoingInterface{{ID: outgoingNICID, MinTTL: defaultMinTTL}}
 	routeKey := multicast.RouteKey{UnicastSource: address, MulticastDestination: address}
 
 	pkt := newPacketBuffer("hello")
@@ -59,16 +59,12 @@ func Example() {
 
 	// Each entry in the table represents either an installed route or a pending
 	// route. To insert a pending route, call:
-	result, err := table.GetRouteOrInsertPending(routeKey, pkt)
+	result, hasBufferSpace := table.GetRouteOrInsertPending(routeKey, pkt)
 
 	// Callers should handle a no buffer space error (e.g. only deliver the
 	// packet locally).
-	if err == multicast.ErrNoBufferSpace {
+	if !hasBufferSpace {
 		deliverPktLocally(pkt)
-	}
-
-	if err != nil {
-		panic(err)
 	}
 
 	// Callers should handle the various pending route states.
