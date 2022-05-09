@@ -30,6 +30,7 @@ go_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/buffer",
         "//pkg/tcpip",
         "//pkg/tcpip/buffer",
         "//pkg/tcpip/seqnum",
@@ -53,6 +54,7 @@ go_test(
         "//pkg/rand",
         "//pkg/tcpip",
         "//pkg/tcpip/buffer",
+        "//pkg/tcpip/prependable",
         "//pkg/tcpip/testutil",
         "@com_github_google_go_cmp//cmp:go_default_library",
     ],

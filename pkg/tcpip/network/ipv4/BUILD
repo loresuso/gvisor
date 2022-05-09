@@ -13,6 +13,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/atomicbitops",
+        "//pkg/buffer",
         "//pkg/sync",
         "//pkg/tcpip",
         "//pkg/tcpip/buffer",
@@ -34,11 +35,11 @@ go_test(
         "main_test.go",
     ],
     deps = [
+        "//pkg/buffer",
         "//pkg/refs",
         "//pkg/refsvfs2",
         "//pkg/sync",
         "//pkg/tcpip",
-        "//pkg/tcpip/buffer",
         "//pkg/tcpip/checker",
         "//pkg/tcpip/faketime",
         "//pkg/tcpip/header",
@@ -47,6 +48,7 @@ go_test(
         "//pkg/tcpip/network/arp",
         "//pkg/tcpip/network/internal/testutil",
         "//pkg/tcpip/network/ipv4",
+        "//pkg/tcpip/prependable",
         "//pkg/tcpip/stack",
         "//pkg/tcpip/testutil",
         "//pkg/tcpip/transport/icmp",

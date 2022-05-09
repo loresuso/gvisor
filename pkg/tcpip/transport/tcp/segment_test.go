@@ -18,10 +18,11 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/faketime"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
+
+const trueSegSize = stack.PacketBufferStructSize + segSize
 
 type segmentSizeWants struct {
 	DataSize   int
@@ -31,7 +32,7 @@ type segmentSizeWants struct {
 func checkSegmentSize(t *testing.T, name string, seg *segment, want segmentSizeWants) {
 	t.Helper()
 	got := segmentSizeWants{
-		DataSize:   seg.data.Size(),
+		DataSize:   seg.payloadSize(),
 		SegMemSize: seg.segMemSize(),
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -42,28 +43,28 @@ func checkSegmentSize(t *testing.T, name string, seg *segment, want segmentSizeW
 func TestSegmentMerge(t *testing.T) {
 	var clock faketime.NullClock
 	id := stack.TransportEndpointID{}
-	seg1 := newOutgoingSegment(id, &clock, buffer.NewView(10))
+	seg1 := newOutgoingSegment(id, &clock, make([]byte, 10))
 	defer seg1.DecRef()
-	seg2 := newOutgoingSegment(id, &clock, buffer.NewView(20))
+	seg2 := newOutgoingSegment(id, &clock, make([]byte, 20))
 	defer seg2.DecRef()
 
 	checkSegmentSize(t, "seg1", seg1, segmentSizeWants{
 		DataSize:   10,
-		SegMemSize: SegSize + 10,
+		SegMemSize: trueSegSize + 10,
 	})
 	checkSegmentSize(t, "seg2", seg2, segmentSizeWants{
 		DataSize:   20,
-		SegMemSize: SegSize + 20,
+		SegMemSize: trueSegSize + 20,
 	})
 
 	seg1.merge(seg2)
 
 	checkSegmentSize(t, "seg1", seg1, segmentSizeWants{
 		DataSize:   30,
-		SegMemSize: SegSize + 30,
+		SegMemSize: trueSegSize + 30,
 	})
 	checkSegmentSize(t, "seg2", seg2, segmentSizeWants{
 		DataSize:   0,
-		SegMemSize: SegSize,
+		SegMemSize: trueSegSize,
 	})
 }

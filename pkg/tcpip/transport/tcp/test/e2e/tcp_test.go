@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/rand"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/refsvfs2"
@@ -2379,7 +2380,7 @@ func TestSmallReceiveBufferReadiness(t *testing.T) {
 	}
 
 	for i := 8; i > 0; i /= 2 {
-		size := int64(i << 10)
+		size := int64(i << 12)
 		t.Run(fmt.Sprintf("size=%d", size), func(t *testing.T) {
 			var clientWQ waiter.Queue
 			client, err := s.NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &clientWQ)
@@ -2549,8 +2550,8 @@ func TestSmallSegReceiveWindowAdvertisement(t *testing.T) {
 	// of the window scaled value. This enables the test to perform equality
 	// checks on the incoming receive window.
 	payloadSize := 1 << c.RcvdWindowScale
-	if payloadSize >= tcp.SegSize {
-		t.Fatalf("payload size of %d is not less than the segment overhead of %d", payloadSize, tcp.SegSize)
+	if payloadSize >= tcp.SegOverheadSize {
+		t.Fatalf("payload size of %d is not less than the segment overhead of %d", payloadSize, tcp.SegOverheadSize)
 	}
 	payload := generateRandomPayload(t, payloadSize)
 	payloadLen := seqnum.Size(len(payload))
@@ -4688,7 +4689,7 @@ func TestReceivedInvalidSegmentCountIncrement(t *testing.T) {
 	stats := c.Stack().Stats()
 	want := stats.TCP.InvalidSegmentsReceived.Value() + 1
 	iss := seqnum.Value(context.TestInitialSequenceNumber).Add(1)
-	vv := c.BuildSegment(nil, &context.Headers{
+	buf := c.BuildSegment(nil, &context.Headers{
 		SrcPort: context.TestPort,
 		DstPort: c.Port,
 		Flags:   header.TCPFlagAck,
@@ -4696,10 +4697,10 @@ func TestReceivedInvalidSegmentCountIncrement(t *testing.T) {
 		AckNum:  c.IRS.Add(1),
 		RcvWnd:  30000,
 	})
-	tcpbuf := vv.ToView()[header.IPv4MinimumSize:]
-	tcpbuf[header.TCPDataOffset] = ((header.TCPMinimumSize - 1) / 4) << 4
+	tcpbuf := buf.Flatten()
+	tcpbuf[header.IPv4MinimumSize+header.TCPDataOffset] = ((header.TCPMinimumSize - 1) / 4) << 4
 
-	c.SendSegment(vv)
+	c.SendSegment(buffer.NewWithData(tcpbuf))
 
 	if got := stats.TCP.InvalidSegmentsReceived.Value(); got != want {
 		t.Errorf("got stats.TCP.InvalidSegmentsReceived.Value() = %d, want = %d", got, want)
@@ -4716,7 +4717,7 @@ func TestReceivedIncorrectChecksumIncrement(t *testing.T) {
 	stats := c.Stack().Stats()
 	want := stats.TCP.ChecksumErrors.Value() + 1
 	iss := seqnum.Value(context.TestInitialSequenceNumber).Add(1)
-	vv := c.BuildSegment([]byte{0x1, 0x2, 0x3}, &context.Headers{
+	buf := c.BuildSegment([]byte{0x1, 0x2, 0x3}, &context.Headers{
 		SrcPort: context.TestPort,
 		DstPort: c.Port,
 		Flags:   header.TCPFlagAck,
@@ -4724,12 +4725,12 @@ func TestReceivedIncorrectChecksumIncrement(t *testing.T) {
 		AckNum:  c.IRS.Add(1),
 		RcvWnd:  30000,
 	})
-	tcpbuf := vv.ToView()[header.IPv4MinimumSize:]
+	tcpbuf := buf.Flatten()
 	// Overwrite a byte in the payload which should cause checksum
 	// verification to fail.
-	tcpbuf[(tcpbuf[header.TCPDataOffset]>>4)*4] = 0x4
+	tcpbuf[header.IPv4MinimumSize+((tcpbuf[header.IPv4MinimumSize+header.TCPDataOffset]>>4)*4)] = 0x4
 
-	c.SendSegment(vv)
+	c.SendSegment(buffer.NewWithData(tcpbuf))
 
 	if got := stats.TCP.ChecksumErrors.Value(); got != want {
 		t.Errorf("got stats.TCP.ChecksumErrors.Value() = %d, want = %d", got, want)
@@ -6803,7 +6804,7 @@ func TestReceiveBufferAutoTuningApplicationLimited(t *testing.T) {
 	time.Sleep(latency)
 	// Send an initial payload with atleast segment overhead size. The receive
 	// window would not grow for smaller segments.
-	rawEP.SendPacketWithTS(make([]byte, tcp.SegSize), tsVal)
+	rawEP.SendPacketWithTS(make([]byte, tcp.SegOverheadSize), tsVal)
 
 	pkt := rawEP.VerifyAndReturnACKWithTS(tsVal)
 	rcvWnd := header.TCP(header.IPv4(pkt).Payload()).WindowSize()

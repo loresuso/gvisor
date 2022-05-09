@@ -71,6 +71,7 @@ go_library(
         "packet_buffer.go",
         "packet_buffer_list.go",
         "packet_buffer_refs.go",
+        "packet_buffer_state.go",
         "packet_buffer_unsafe.go",
         "pending_packets.go",
         "rand.go",
@@ -133,6 +134,7 @@ go_test(
         "//pkg/tcpip/network/ipv4",
         "//pkg/tcpip/network/ipv6",
         "//pkg/tcpip/ports",
+        "//pkg/tcpip/prependable",
         "//pkg/tcpip/testutil",
         "//pkg/tcpip/transport/icmp",
         "//pkg/tcpip/transport/udp",
@@ -156,6 +158,7 @@ go_test(
     library = ":stack",
     deps = [
         "//pkg/atomicbitops",
+        "//pkg/buffer",
         "//pkg/sync",
         "//pkg/tcpip",
         "//pkg/tcpip/buffer",
