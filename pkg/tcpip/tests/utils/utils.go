@@ -18,8 +18,8 @@ package utils
 import (
 	"testing"
 
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/link/ethernet"
@@ -27,6 +27,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/link/pipe"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
+	"gvisor.dev/gvisor/pkg/tcpip/prependable"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/testutil"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
@@ -354,9 +355,9 @@ func SetupRoutedStacks(t *testing.T, host1Stack, routerStack, host2Stack *stack.
 }
 
 // ICMPv4Echo returns an ICMPv4 echo packet.
-func ICMPv4Echo(src, dst tcpip.Address, ttl uint8, ty header.ICMPv4Type) buffer.View {
+func ICMPv4Echo(src, dst tcpip.Address, ttl uint8, ty header.ICMPv4Type) []byte {
 	totalLen := header.IPv4MinimumSize + header.ICMPv4MinimumSize
-	hdr := buffer.NewPrependable(totalLen)
+	hdr := prependable.New(totalLen)
 	pkt := header.ICMPv4(hdr.Prepend(header.ICMPv4MinimumSize))
 	pkt.SetType(ty)
 	pkt.SetCode(header.ICMPv4UnusedCode)
@@ -378,7 +379,7 @@ func ICMPv4Echo(src, dst tcpip.Address, ttl uint8, ty header.ICMPv4Type) buffer.
 // the provided endpoint.
 func RxICMPv4EchoRequest(e *channel.Endpoint, src, dst tcpip.Address, ttl uint8) {
 	newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Data: ICMPv4Echo(src, dst, ttl, header.ICMPv4Echo).ToVectorisedView(),
+		Payload: buffer.NewWithData(ICMPv4Echo(src, dst, ttl, header.ICMPv4Echo)),
 	})
 	defer newPkt.DecRef()
 	e.InjectInbound(header.IPv4ProtocolNumber, newPkt)
@@ -388,16 +389,16 @@ func RxICMPv4EchoRequest(e *channel.Endpoint, src, dst tcpip.Address, ttl uint8)
 // the provided endpoint.
 func RxICMPv4EchoReply(e *channel.Endpoint, src, dst tcpip.Address, ttl uint8) {
 	newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Data: ICMPv4Echo(src, dst, ttl, header.ICMPv4EchoReply).ToVectorisedView(),
+		Payload: buffer.NewWithData(ICMPv4Echo(src, dst, ttl, header.ICMPv4EchoReply)),
 	})
 	defer newPkt.DecRef()
 	e.InjectInbound(header.IPv4ProtocolNumber, newPkt)
 }
 
 // ICMPv6Echo returns an ICMPv6 echo packet.
-func ICMPv6Echo(src, dst tcpip.Address, ttl uint8, ty header.ICMPv6Type) buffer.View {
+func ICMPv6Echo(src, dst tcpip.Address, ttl uint8, ty header.ICMPv6Type) []byte {
 	totalLen := header.IPv6MinimumSize + header.ICMPv6MinimumSize
-	hdr := buffer.NewPrependable(totalLen)
+	hdr := prependable.New(totalLen)
 	pkt := header.ICMPv6(hdr.Prepend(header.ICMPv6MinimumSize))
 	pkt.SetType(ty)
 	pkt.SetCode(header.ICMPv6UnusedCode)
@@ -422,7 +423,7 @@ func ICMPv6Echo(src, dst tcpip.Address, ttl uint8, ty header.ICMPv6Type) buffer.
 // the provided endpoint.
 func RxICMPv6EchoRequest(e *channel.Endpoint, src, dst tcpip.Address, ttl uint8) {
 	newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Data: ICMPv6Echo(src, dst, ttl, header.ICMPv6EchoRequest).ToVectorisedView(),
+		Payload: buffer.NewWithData(ICMPv6Echo(src, dst, ttl, header.ICMPv6EchoRequest)),
 	})
 	defer newPkt.DecRef()
 	e.InjectInbound(header.IPv6ProtocolNumber, newPkt)
@@ -432,7 +433,7 @@ func RxICMPv6EchoRequest(e *channel.Endpoint, src, dst tcpip.Address, ttl uint8)
 // the provided endpoint.
 func RxICMPv6EchoReply(e *channel.Endpoint, src, dst tcpip.Address, ttl uint8) {
 	newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Data: ICMPv6Echo(src, dst, ttl, header.ICMPv6EchoReply).ToVectorisedView(),
+		Payload: buffer.NewWithData(ICMPv6Echo(src, dst, ttl, header.ICMPv6EchoReply)),
 	})
 	defer newPkt.DecRef()
 	e.InjectInbound(header.IPv6ProtocolNumber, newPkt)

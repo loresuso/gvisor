@@ -8,8 +8,8 @@ go_library(
     srcs = ["utils.go"],
     visibility = ["//pkg/tcpip/tests:__subpackages__"],
     deps = [
+        "//pkg/buffer",
         "//pkg/tcpip",
-        "//pkg/tcpip/buffer",
         "//pkg/tcpip/header",
         "//pkg/tcpip/link/channel",
         "//pkg/tcpip/link/ethernet",
@@ -17,6 +17,7 @@ go_library(
         "//pkg/tcpip/link/pipe",
         "//pkg/tcpip/network/ipv4",
         "//pkg/tcpip/network/ipv6",
+        "//pkg/tcpip/prependable",
         "//pkg/tcpip/stack",
         "//pkg/tcpip/testutil",
         "//pkg/tcpip/transport/icmp",

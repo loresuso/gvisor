@@ -28,9 +28,9 @@ import (
 	"io"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/waiter"
@@ -39,10 +39,9 @@ import (
 // +stateify savable
 type packet struct {
 	packetEntry
-	// data holds the actual packet data, including any headers and
-	// payload.
-	data       buffer.VectorisedView `state:".(buffer.VectorisedView)"`
-	receivedAt time.Time             `state:".(int64)"`
+	// data holds the actual packet data, including any headers and payload.
+	data       *stack.PacketBuffer
+	receivedAt time.Time `state:".(int64)"`
 	// senderAddr is the network address of the sender.
 	senderAddr tcpip.FullAddress
 	// packetInfo holds additional information like the protocol
@@ -145,7 +144,9 @@ func (ep *endpoint) Close() {
 	ep.rcvClosed = true
 	ep.rcvBufSize = 0
 	for !ep.rcvList.Empty() {
-		ep.rcvList.Remove(ep.rcvList.Front())
+		p := ep.rcvList.Front()
+		ep.rcvList.Remove(p)
+		p.data.DecRef()
 	}
 
 	ep.closed = true
@@ -174,6 +175,7 @@ func (ep *endpoint) Read(dst io.Writer, opts tcpip.ReadOptions) (tcpip.ReadResul
 	packet := ep.rcvList.Front()
 	if !opts.Peek {
 		ep.rcvList.Remove(packet)
+		defer packet.data.DecRef()
 		ep.rcvBufSize -= packet.data.Size()
 	}
 
@@ -193,7 +195,7 @@ func (ep *endpoint) Read(dst io.Writer, opts tcpip.ReadOptions) (tcpip.ReadResul
 		res.LinkPacketInfo = packet.packetInfo
 	}
 
-	n, err := packet.data.ReadTo(dst, opts.Peek)
+	n, err := packet.data.Data().ReadTo(dst, opts.Peek)
 	if n == 0 && err != nil {
 		return res, &tcpip.ErrBadBuffer{}
 	}
@@ -233,16 +235,16 @@ func (ep *endpoint) Write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, tc
 	}
 
 	// TODO(https://gvisor.dev/issue/6538): Avoid this allocation.
-	payloadBytes := make(buffer.View, p.Len())
+	payloadBytes := make([]byte, p.Len())
 	if _, err := io.ReadFull(p, payloadBytes); err != nil {
 		return 0, &tcpip.ErrBadBuffer{}
 	}
 
 	if err := func() tcpip.Error {
 		if ep.cooked {
-			return ep.stack.WritePacketToRemote(nicID, remote, proto, payloadBytes.ToVectorisedView())
+			return ep.stack.WritePacketToRemote(nicID, remote, proto, buffer.NewWithData(payloadBytes))
 		}
-		return ep.stack.WriteRawPacket(nicID, proto, payloadBytes.ToVectorisedView())
+		return ep.stack.WriteRawPacket(nicID, proto, buffer.NewWithData(payloadBytes))
 	}(); err != nil {
 		return 0, err
 	}
@@ -442,25 +444,19 @@ func (ep *endpoint) HandlePacket(nicID tcpip.NICID, netProto tcpip.NetworkProtoc
 		receivedAt: ep.stack.Clock().Now(),
 	}
 
-	if !pkt.LinkHeader().View().IsEmpty() {
+	if len(pkt.LinkHeader().View()) != 0 {
 		hdr := header.Ethernet(pkt.LinkHeader().View())
 		rcvdPkt.senderAddr.Addr = tcpip.Address(hdr.SourceAddress())
 	}
 
+	// Raw packet endpoints include link-headers in received packets.
+	pktBuf := pkt.Buffer()
 	if ep.cooked {
 		// Cooked packet endpoints don't include the link-headers in received
 		// packets.
-		if v := pkt.NetworkHeader().View(); !v.IsEmpty() {
-			rcvdPkt.data.AppendView(v)
-		}
-		if v := pkt.TransportHeader().View(); !v.IsEmpty() {
-			rcvdPkt.data.AppendView(v)
-		}
-		rcvdPkt.data.Append(pkt.Data().ExtractVV())
-	} else {
-		// Raw packet endpoints include link-headers in received packets.
-		rcvdPkt.data = buffer.NewVectorisedView(pkt.Size(), pkt.Views())
+		pktBuf.TrimFront(int64(len(pkt.LinkHeader().View()) + len(pkt.VirtioNetHeader().View())))
 	}
+	rcvdPkt.data = stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: pktBuf})
 
 	ep.rcvList.PushBack(&rcvdPkt)
 	ep.rcvBufSize += rcvdPkt.data.Size()

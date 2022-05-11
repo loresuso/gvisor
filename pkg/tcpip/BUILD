@@ -32,7 +32,6 @@ go_library(
     deps = [
         "//pkg/atomicbitops",
         "//pkg/sync",
-        "//pkg/tcpip/buffer",
         "//pkg/waiter",
     ],
 )
@@ -48,8 +47,8 @@ deps_test(
     allowed = [
         # gVisor deps.
         "//pkg/atomicbitops",
-        "//pkg/buffer",
         "//pkg/context",
+        "//pkg/buffer",
         "//pkg/cpuid",
         "//pkg/gohacks",
         "//pkg/goid",
@@ -77,7 +76,6 @@ deps_test(
     targets = [
         "//pkg/tcpip",
         "//pkg/tcpip/adapters/gonet",
-        "//pkg/tcpip/buffer",
         "//pkg/tcpip/link/channel",
         "//pkg/tcpip/header",
         "//pkg/tcpip/link/fdbased",

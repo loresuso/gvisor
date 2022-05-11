@@ -19,7 +19,6 @@ import (
 	"io"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/seqnum"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -91,8 +90,8 @@ func newIncomingSegment(id stack.TransportEndpointID, clock tcpip.Clock, pkt *st
 	//    then part of the header would be delivered to user.
 	// 2. That the header fits within the buffer; if we don't do this, we
 	//    would panic when we tried to access data beyond the buffer.
-	if pkt.TransportHeader().View().Size() < header.TCPMinimumSize {
-		return nil, fmt.Errorf("packet header smaller than minimum TCP header size: minimum size = %d, got size=%d", header.TCPMinimumSize, pkt.TransportHeader().View().Size())
+	if len(pkt.TransportHeader().View()) < header.TCPMinimumSize {
+		return nil, fmt.Errorf("packet header smaller than minimum TCP header size: minimum size = %d, got size=%d", header.TCPMinimumSize, len(pkt.TransportHeader().View()))
 	}
 	hdr := header.TCP(pkt.TransportHeader().View())
 	offset := int(hdr.DataOffset())
@@ -127,7 +126,7 @@ func newIncomingSegment(id stack.TransportEndpointID, clock tcpip.Clock, pkt *st
 	return s, nil
 }
 
-func newOutgoingSegment(id stack.TransportEndpointID, clock tcpip.Clock, v buffer.View) *segment {
+func newOutgoingSegment(id stack.TransportEndpointID, clock tcpip.Clock, v []byte) *segment {
 	s := &segment{
 		id: id,
 	}

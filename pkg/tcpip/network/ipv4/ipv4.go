@@ -24,7 +24,6 @@ import (
 	"gvisor.dev/gvisor/pkg/atomicbitops"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/header/parse"
 	"gvisor.dev/gvisor/pkg/tcpip/network/hash"
@@ -123,7 +122,7 @@ func (e *endpoint) HandleLinkResolutionFailure(pkt *stack.PacketBuffer) {
 	// handleControl expects the entire offending packet to be in the packet
 	// buffer's data field.
 	pkt = stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Data: buffer.NewVectorisedView(pkt.Size(), pkt.Views()),
+		Payload: pkt.Buffer(),
 	})
 	defer pkt.DecRef()
 	pkt.NICID = e.nic.ID()
@@ -514,7 +513,7 @@ func (e *endpoint) writePacketPostRouting(r *stack.Route, pkt *stack.PacketBuffe
 
 	stats := e.stats.ip
 
-	networkMTU, err := calculateNetworkMTU(e.nic.MTU(), uint32(pkt.NetworkHeader().View().Size()))
+	networkMTU, err := calculateNetworkMTU(e.nic.MTU(), uint32(len(pkt.NetworkHeader().View())))
 	if err != nil {
 		stats.OutgoingPacketErrors.Increment()
 		return err
@@ -903,7 +902,7 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 	}
 
 	if h.More() || h.FragmentOffset() != 0 {
-		if pkt.Data().Size()+pkt.TransportHeader().View().Size() == 0 {
+		if pkt.Data().Size()+len(pkt.TransportHeader().View()) == 0 {
 			// Drop the packet as it's marked as a fragment but has
 			// no payload.
 			stats.ip.MalformedPacketsReceived.Increment()
@@ -1221,7 +1220,9 @@ func (p *protocol) MinimumPacketSize() int {
 }
 
 // ParseAddresses implements stack.NetworkProtocol.
-func (*protocol) ParseAddresses(v buffer.View) (src, dst tcpip.Address) {
+// TODO(b/230896518): Remove buffer.View once stack.NetworkProtocol is changed
+// to use pkg/buffer.Buffer.
+func (*protocol) ParseAddresses(v []byte) (src, dst tcpip.Address) {
 	h := header.IPv4(v)
 	return h.SourceAddress(), h.DestinationAddress()
 }
@@ -1279,7 +1280,7 @@ func (p *protocol) parseAndValidate(pkt *stack.PacketBuffer) (header.IPv4, bool)
 	h := header.IPv4(pkt.NetworkHeader().View())
 	// Do not include the link header's size when calculating the size of the IP
 	// packet.
-	if !h.IsValid(pkt.Size() - pkt.LinkHeader().View().Size()) {
+	if !h.IsValid(pkt.Size() - len(pkt.LinkHeader().View())) {
 		return nil, false
 	}
 
@@ -1382,7 +1383,7 @@ func calculateNetworkMTU(linkMTU, networkHeaderSize uint32) (uint32, tcpip.Error
 }
 
 func packetMustBeFragmented(pkt *stack.PacketBuffer, networkMTU uint32) bool {
-	payload := pkt.TransportHeader().View().Size() + pkt.Data().Size()
+	payload := len(pkt.TransportHeader().View()) + pkt.Data().Size()
 	return pkt.GSOOptions.Type == stack.GSONone && uint32(payload) > networkMTU
 }
 
