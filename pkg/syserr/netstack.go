@@ -52,6 +52,8 @@ var (
 	ErrBadBuffer             = New((&tcpip.ErrBadBuffer{}).String(), errno.EFAULT)
 	ErrMalformedHeader       = New((&tcpip.ErrMalformedHeader{}).String(), errno.EINVAL)
 	ErrInvalidPortRange      = New((&tcpip.ErrInvalidPortRange{}).String(), errno.EINVAL)
+	ErrInputCannotBeOutput   = New((&tcpip.ErrInputCannotBeOutput{}).String(), errno.EINVAL)
+	ErrMissingRequiredFields = New((&tcpip.ErrMissingRequiredFields{}).String(), errno.EINVAL)
 )
 
 // TranslateNetstackError converts an error from the tcpip package to a sentry
@@ -138,6 +140,10 @@ func TranslateNetstackError(err tcpip.Error) *Error {
 		return ErrMalformedHeader
 	case *tcpip.ErrInvalidPortRange:
 		return ErrInvalidPortRange
+	case *tcpip.ErrInputCannotBeOutput:
+		return ErrInputCannotBeOutput
+	case *tcpip.ErrMissingRequiredFields:
+		return ErrMissingRequiredFields
 	default:
 		panic(fmt.Sprintf("unknown error %T", err))
 	}

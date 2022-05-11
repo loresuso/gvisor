@@ -145,7 +145,7 @@ var (
 	RouterNIC2IPv4Addr = tcpip.ProtocolAddress{
 		Protocol: ipv4.ProtocolNumber,
 		AddressWithPrefix: tcpip.AddressWithPrefix{
-			Address:   tcpip.Address(net.ParseIP("10.0.0.1").To4()),
+			Address:   tcpip.Address(net.ParseIP("10.0.0.3").To4()),
 			PrefixLen: 8,
 		},
 	}

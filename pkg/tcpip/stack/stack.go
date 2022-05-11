@@ -563,6 +563,39 @@ func (s *Stack) SetForwardingDefaultAndAllNICs(protocol tcpip.NetworkProtocolNum
 	return nil
 }
 
+// AddMulticastRoute adds a multicast route to be used for the specified
+// addresses and protocol.
+func (s *Stack) AddMulticastRoute(protocol tcpip.NetworkProtocolNumber, addresses UnicastSourceAndMulticastDestination, route MulticastRoute) tcpip.Error {
+	netProto, ok := s.networkProtocols[protocol]
+	if !ok {
+		return &tcpip.ErrUnknownProtocol{}
+	}
+
+	forwardingNetProto, ok := netProto.(MulticastForwardingNetworkProtocol)
+	if !ok {
+		return &tcpip.ErrNotSupported{}
+	}
+
+	return forwardingNetProto.AddMulticastRoute(addresses, route)
+}
+
+// GetMulticastRouteLastUsedTime returns a monotonic timestamp that
+// represents the last time that the route that matches the provided
+// addresses and protocol was used or updated.
+func (s *Stack) GetMulticastRouteLastUsedTime(protocol tcpip.NetworkProtocolNumber, addresses UnicastSourceAndMulticastDestination) (tcpip.MonotonicTime, tcpip.Error) {
+	netProto, ok := s.networkProtocols[protocol]
+	if !ok {
+		return tcpip.MonotonicTime{}, &tcpip.ErrUnknownProtocol{}
+	}
+
+	forwardingNetProto, ok := netProto.(MulticastForwardingNetworkProtocol)
+	if !ok {
+		return tcpip.MonotonicTime{}, &tcpip.ErrNotSupported{}
+	}
+
+	return forwardingNetProto.GetMulticastRouteLastUsedTime(addresses)
+}
+
 // SetNICMulticastForwarding enables or disables multicast packet forwarding on
 // the specified NIC for the passed protocol.
 //
@@ -1042,6 +1075,22 @@ func (s *Stack) getAddressEP(nic *nic, localAddr, remoteAddr tcpip.Address, netP
 		return nic.primaryEndpoint(netProto, remoteAddr)
 	}
 	return nic.findEndpoint(netProto, localAddr, CanBePrimaryEndpoint)
+}
+
+// NewMulticastRoute returns a Route that may be used to forward multicast
+// packets.
+//
+// Returns nil if validation fails.
+func (s *Stack) NewMulticastRoute(nicID tcpip.NICID, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber) *Route {
+	nic, ok := s.nics[nicID]
+	if !ok || !nic.Enabled() {
+		return nil
+	}
+
+	if addressEndpoint := s.getAddressEP(nic, "" /* localAddr */, remoteAddr, netProto); addressEndpoint != nil {
+		return constructAndValidateRoute(netProto, addressEndpoint, nic, nic, "" /* gateway */, "" /* localAddr */, remoteAddr, s.handleLocal, false /* multicastLoop */)
+	}
+	return nil
 }
 
 // findLocalRouteFromNICRLocked is like findLocalRouteRLocked but finds a route

@@ -74,6 +74,32 @@ func (*ErrMessageTooLong) isForwardingError() {}
 
 func (*ErrMessageTooLong) String() string { return "message too long" }
 
+// ErrNoBufferSpace indicates the packet could not be queued due to
+// insufficient buffer space.
+//
+// +stateify savable
+type ErrNoBufferSpace struct{}
+
+func (*ErrNoBufferSpace) isForwardingError() {}
+
+func (*ErrNoBufferSpace) String() string { return "no buffer space" }
+
+// ErrUnexpectedInputInterface indicates that the interface that the packet
+// arrived on did not match the routes expected input interface.
+type ErrUnexpectedInputInterface struct{}
+
+func (*ErrUnexpectedInputInterface) isForwardingError() {}
+
+func (*ErrUnexpectedInputInterface) String() string { return "unexpected input interface" }
+
+// ErrUnknownEndpoint indicates that the endpoint associated with a route could
+// not be found.
+type ErrUnknownEndpoint struct{}
+
+func (*ErrUnknownEndpoint) isForwardingError() {}
+
+func (*ErrUnknownEndpoint) String() string { return "unknown endpoint" }
+
 // ErrOther indicates the packet coould not be forwarded for a reason
 // captured by the contained error.
 type ErrOther struct {

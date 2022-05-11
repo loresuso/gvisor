@@ -1698,11 +1698,24 @@ type IPForwardingStats struct {
 	// header.
 	ExtensionHeaderProblem *StatCounter
 
+	// UnexpectedInputInterface is the number of multicast packets that were
+	// received on an interface that did not match the corresponding route's
+	// expected input interface.
+	UnexpectedInputInterface *StatCounter
+
+	// UnknownEndpoint is the number of packets that could not be forwarded
+	// because the output endpoint could not be found.
+	UnknownEndpoint *StatCounter
+
+	// NoBufferSpace is the number of multicast packets that were dropped due to
+	// insufficent buffer space in the pending packet queue.
+	NoBufferSpace *StatCounter
+
 	// Errors is the number of IP packets received which could not be
 	// successfully forwarded.
 	Errors *StatCounter
 
-	// LINT.ThenChange(network/internal/ip/stats.go:multiCounterIPForwardingStats)
+	// LINT.ThenChange(network/internal/ip/stats.go:MultiCounterIPForwardingStats)
 }
 
 // IPStats collects IP-specific stats (both v4 and v6).

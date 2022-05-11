@@ -552,4 +552,31 @@ func (*ErrWouldBlock) IgnoreStats() bool {
 }
 func (*ErrWouldBlock) String() string { return "operation would block" }
 
+// ErrMissingRequiredFields indicates that a required field is missing.
+//
+// +stateify savable
+type ErrMissingRequiredFields struct{}
+
+func (*ErrMissingRequiredFields) isError() {}
+
+// IgnoreStats implements Error.
+func (*ErrMissingRequiredFields) IgnoreStats() bool {
+	return true
+}
+func (*ErrMissingRequiredFields) String() string { return "mising required fields" }
+
+// ErrInputCannotBeOutput indicates that an input interface matches an output
+// interface in a multicast route.
+//
+// +stateify savable
+type ErrInputCannotBeOutput struct{}
+
+func (*ErrInputCannotBeOutput) isError() {}
+
+// IgnoreStats implements Error.
+func (*ErrInputCannotBeOutput) IgnoreStats() bool {
+	return true
+}
+func (*ErrInputCannotBeOutput) String() string { return "output cannot contain input" }
+
 // LINT.ThenChange(../syserr/netstack.go)

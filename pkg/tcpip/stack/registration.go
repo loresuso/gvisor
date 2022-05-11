@@ -757,6 +757,61 @@ type NetworkProtocol interface {
 	Parse(pkt *PacketBuffer) (proto tcpip.TransportProtocolNumber, hasTransportHdr bool, ok bool)
 }
 
+// UnicastSourceAndMulticastDestination is a tuple that represents a unicast
+// source address and a multicast destination address.
+type UnicastSourceAndMulticastDestination struct {
+	// Source represents a unicast source address.
+	Source tcpip.Address
+	// Destination represents a multicast destination address.
+	Destination tcpip.Address
+}
+
+// OutgoingInterface represents an interface that packets should be forwarded
+// out of.
+type OutgoingInterface struct {
+	// ID corresponds to the outgoing NIC.
+	ID tcpip.NICID
+
+	// MinTTL represents the minumum TTL/HopLimit a multicast packet must have to
+	// be sent through the outgoing interface.
+	//
+	// Note: a value of 0 naturally allows all packets to be forwarded.
+	MinTTL uint8
+}
+
+// MulticastRoute is a route to be inserted into a multicast routing table.
+type MulticastRoute struct {
+	// ExpectedInputInterface is the expected input interface for a multicast
+	// packet using this route.
+	ExpectedInputInterface tcpip.NICID
+
+	// OutgoingInterfaces is the set of interfaces that a multicast packet should
+	// be forwarded out of.
+	//
+	// This field must not be empty.
+	OutgoingInterfaces []OutgoingInterface
+}
+
+// MulticastForwardingNetworkProtocol is the interface that needs to be
+// implemented by the network protocols that support multicast forwarding.
+type MulticastForwardingNetworkProtocol interface {
+	NetworkProtocol
+
+	// AddMulticastRoute adds a route to the multicast routing table such that
+	// packets matching the addresses will be forwarded using the provided route.
+	//
+	// Returns an error if the addresses or route is invalid.
+	AddMulticastRoute(addresses UnicastSourceAndMulticastDestination, route MulticastRoute) tcpip.Error
+
+	// GetMulticastRouteLastUsedTime returns a monotonic timestamp that
+	// represents the last time that the route that matches the provided
+	// addresses was used or updated.
+	//
+	// Returns an error if the addresses are invalid or a matching route was not
+	// found.
+	GetMulticastRouteLastUsedTime(addresses UnicastSourceAndMulticastDestination) (tcpip.MonotonicTime, tcpip.Error)
+}
+
 // NetworkDispatcher contains the methods used by the network stack to deliver
 // inbound/outbound packets to the appropriate network/packet(if any) endpoints.
 type NetworkDispatcher interface {

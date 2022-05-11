@@ -52,12 +52,14 @@ type RouteTable struct {
 	pendingMu sync.RWMutex
 	// +checklocks:pendingMu
 	pendingRoutes map[RouteKey]PendingRoute
-
-	config Config
-
 	// cleanupPendingRoutesTimer is a timer that triggers a routine to remove
 	// pending routes that are expired.
+	// +checklocks:pendingMu
 	cleanupPendingRoutesTimer tcpip.Timer
+	// +checklocks:pendingMu
+	isCleanupRoutineRunning bool
+
+	config Config
 }
 
 var (
@@ -231,7 +233,6 @@ func (r *RouteTable) Init(config Config) error {
 	r.installedRoutes = make(map[RouteKey]*InstalledRoute)
 	r.pendingRoutes = make(map[RouteKey]PendingRoute)
 
-	r.cleanupPendingRoutesTimer = r.config.Clock.AfterFunc(DefaultCleanupInterval, r.cleanupPendingRoutes)
 	return nil
 }
 
@@ -240,17 +241,38 @@ func (r *RouteTable) Init(config Config) error {
 // Calling this will stop the cleanup routine and release any packets owned by
 // the table.
 func (r *RouteTable) Close() {
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+
 	if r.cleanupPendingRoutesTimer != nil {
 		r.cleanupPendingRoutesTimer.Stop()
 	}
-
-	r.pendingMu.Lock()
-	defer r.pendingMu.Unlock()
 
 	for key, route := range r.pendingRoutes {
 		delete(r.pendingRoutes, key)
 		route.releasePackets()
 	}
+}
+
+// maybeStopCleanupRoutine stops the pending routes cleanup routine if no
+// pending routes exist.
+//
+// Returns true if the timer does not exist or it is not running. Otherwise,
+// returns false.
+//
+// +checklocks:r.pendingMu
+func (r *RouteTable) maybeStopCleanupRoutineLocked() bool {
+	if r.cleanupPendingRoutesTimer == nil || !r.isCleanupRoutineRunning {
+		return true
+	}
+
+	if len(r.pendingRoutes) == 0 {
+		r.cleanupPendingRoutesTimer.Stop()
+		r.isCleanupRoutineRunning = false
+		return true
+	}
+
+	return false
 }
 
 func (r *RouteTable) cleanupPendingRoutes() {
@@ -264,7 +286,10 @@ func (r *RouteTable) cleanupPendingRoutes() {
 			route.releasePackets()
 		}
 	}
-	r.cleanupPendingRoutesTimer.Reset(DefaultCleanupInterval)
+
+	if stopped := r.maybeStopCleanupRoutineLocked(); !stopped {
+		r.cleanupPendingRoutesTimer.Reset(DefaultCleanupInterval)
+	}
 }
 
 func (r *RouteTable) newPendingRoute() PendingRoute {
@@ -275,7 +300,11 @@ func (r *RouteTable) newPendingRoute() PendingRoute {
 }
 
 // NewInstalledRoute instatiates an installed route for the table.
-func (r *RouteTable) NewInstalledRoute(inputInterface tcpip.NICID, outgoingInterfaces []OutgoingInterface) *InstalledRoute {
+func (r *RouteTable) NewInstalledRoute(inputInterface tcpip.NICID, stackOutgoingInterfaces []stack.OutgoingInterface) *InstalledRoute {
+	outgoingInterfaces := make([]OutgoingInterface, len(stackOutgoingInterfaces))
+	for i, outgoingInterface := range stackOutgoingInterfaces {
+		outgoingInterfaces[i] = OutgoingInterface{ID: outgoingInterface.ID, MinTTL: outgoingInterface.MinTTL}
+	}
 	return &InstalledRoute{
 		expectedInputInterface: inputInterface,
 		outgoingInterfaces:     outgoingInterfaces,
@@ -334,15 +363,14 @@ func (e PendingRouteState) String() string {
 // in a pending route. The GetRouteResult.PendingRouteState will indicate
 // whether the pkt was queued in a new pending route or an existing one.
 //
-// If the relevant pending route queue is at max capacity, then
-// ErrNoBufferSpace is returned. In such a case, callers are typically expected
-// to only deliver the pkt locally (if relevant).
-func (r *RouteTable) GetRouteOrInsertPending(key RouteKey, pkt *stack.PacketBuffer) (GetRouteResult, error) {
+// If the relevant pending route queue is at max capacity, then false is
+// returned. Otherwise, returns true.
+func (r *RouteTable) GetRouteOrInsertPending(key RouteKey, pkt *stack.PacketBuffer) (GetRouteResult, bool) {
 	r.installedMu.RLock()
 	defer r.installedMu.RUnlock()
 
 	if route, ok := r.installedRoutes[key]; ok {
-		return GetRouteResult{PendingRouteState: PendingRouteStateNone, InstalledRoute: route}, nil
+		return GetRouteResult{PendingRouteState: PendingRouteStateNone, InstalledRoute: route}, true
 	}
 
 	r.pendingMu.Lock()
@@ -353,12 +381,22 @@ func (r *RouteTable) GetRouteOrInsertPending(key RouteKey, pkt *stack.PacketBuff
 		// The incoming packet is rejected if the pending queue is already at max
 		// capacity. This behavior matches the Linux implementation:
 		// https://github.com/torvalds/linux/blob/ae085d7f936/net/ipv4/ipmr.c#L1147
-		return GetRouteResult{}, ErrNoBufferSpace
+		return GetRouteResult{}, false
 	}
 	pendingRoute.packets = append(pendingRoute.packets, pkt.Clone())
 	r.pendingRoutes[key] = pendingRoute
 
-	return GetRouteResult{PendingRouteState: pendingRouteState, InstalledRoute: nil}, nil
+	if !r.isCleanupRoutineRunning {
+		// The cleanup routine isn't running, but should be. Start it.
+		if r.cleanupPendingRoutesTimer == nil {
+			r.cleanupPendingRoutesTimer = r.config.Clock.AfterFunc(DefaultCleanupInterval, r.cleanupPendingRoutes)
+		} else {
+			r.cleanupPendingRoutesTimer.Reset(DefaultCleanupInterval)
+		}
+		r.isCleanupRoutineRunning = true
+	}
+
+	return GetRouteResult{PendingRouteState: pendingRouteState, InstalledRoute: nil}, true
 }
 
 // +checklocks:r.pendingMu
@@ -383,6 +421,7 @@ func (r *RouteTable) AddInstalledRoute(key RouteKey, route *InstalledRoute) []*s
 	r.pendingMu.Lock()
 	pendingRoute, ok := r.pendingRoutes[key]
 	delete(r.pendingRoutes, key)
+	r.maybeStopCleanupRoutineLocked()
 	r.pendingMu.Unlock()
 
 	// Ignore the pending route if it is expired. It may be in this state since
