@@ -2038,6 +2038,7 @@ func udpv4Packet(srcAddr, dstAddr tcpip.Address, srcPort, dstPort uint16, dataSi
 	udp := header.UDP(hdr.Prepend(udpSize))
 	udp.SetSourcePort(srcPort)
 	udp.SetDestinationPort(dstPort)
+	udp.SetLength(uint16(udpSize))
 	udp.SetChecksum(0)
 	udp.SetChecksum(^udp.CalculateChecksum(header.PseudoHeaderChecksum(
 		header.UDPProtocolNumber,
@@ -2102,6 +2103,7 @@ func udpv6Packet(srcAddr, dstAddr tcpip.Address, srcPort, dstPort uint16, dataSi
 	udp := header.UDP(hdr.Prepend(udpSize))
 	udp.SetSourcePort(srcPort)
 	udp.SetDestinationPort(dstPort)
+	udp.SetLength(uint16(udpSize))
 	udp.SetChecksum(0)
 	udp.SetChecksum(^udp.CalculateChecksum(header.PseudoHeaderChecksum(
 		header.UDPProtocolNumber,
@@ -3305,4 +3307,161 @@ func TestRejectWith(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestInvalidTransportHeader tests that bad transport headers (with a bad
+// length/offset field) don't panic.
+func TestInvalidTransportHeader(t *testing.T) {
+	tests := []struct {
+		name       string
+		setupStack func(*testing.T) (*stack.Stack, *channel.Endpoint)
+		genPacket  func(int8) *stack.PacketBuffer
+		offset     int8
+	}{
+		{
+			name:       "TCP offset small",
+			setupStack: genStackTCP4,
+			genPacket:  genTCP4,
+			offset:     -1,
+		},
+		{
+			name:       "TCP offset large",
+			setupStack: genStackTCP4,
+			genPacket:  genTCP4,
+			offset:     1,
+		},
+		{
+			name:       "UDP offset small",
+			setupStack: genStackUDP4,
+			genPacket:  genUDP4,
+			offset:     -1,
+		},
+		{
+			name:       "UDP offset large",
+			setupStack: genStackUDP4,
+			genPacket:  genUDP4,
+			offset:     1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s, e := test.setupStack(t)
+
+			// Enable iptables and conntrack.
+			ipt := s.IPTables()
+			filter := ipt.GetTable(stack.FilterID, false /* ipv6 */)
+			ipt.ReplaceTable(stack.FilterID, filter, false /* ipv6 */)
+
+			// This can panic if conntrack isn't checking lengths.
+			e.InjectInbound(header.IPv4ProtocolNumber, test.genPacket(test.offset))
+		})
+	}
+}
+
+func genStackTCP4(t *testing.T) (*stack.Stack, *channel.Endpoint) {
+	t.Helper()
+	s := stack.New(stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol},
+	})
+	e := channel.New(0, header.IPv4MinimumMTU, linkAddr)
+	nicOpts := stack.NICOptions{Name: nicName}
+	if err := s.CreateNICWithOptions(nicID, e, nicOpts); err != nil {
+		t.Fatalf("CreateNICWithOptions(%d, _, %#v) = %s", nicID, nicOpts, err)
+	}
+	protocolAddr := tcpip.ProtocolAddress{
+		Protocol:          header.IPv4ProtocolNumber,
+		AddressWithPrefix: dstAddrV4.WithPrefix(),
+	}
+	if err := s.AddProtocolAddress(nicID, protocolAddr, stack.AddressProperties{}); err != nil {
+		t.Fatalf("AddProtocolAddress(%d, %+v, {}): %s", nicID, protocolAddr, err)
+	}
+	return s, e
+}
+
+func genTCP4(offset int8) *stack.PacketBuffer {
+	const payloadSize = 0
+	pktSize := header.IPv4MinimumSize + payloadSize + header.TCPMinimumSize
+	hdr := buffer.NewPrependable(pktSize)
+
+	tcp := header.TCP(hdr.Prepend(payloadSize + header.TCPMinimumSize))
+	tcp.Encode(&header.TCPFields{
+		SeqNum:     0,
+		AckNum:     0,
+		DataOffset: header.TCPMinimumSize + uint8(offset)*4, // DataOffset must be a multiple of 4.
+		Flags:      header.TCPFlagSyn,
+		Checksum:   0,
+	})
+
+	ip := header.IPv4(hdr.Prepend(header.IPv4MinimumSize))
+	ip.Encode(&header.IPv4Fields{
+		TOS:            0,
+		TotalLength:    uint16(pktSize),
+		ID:             1,
+		Flags:          0,
+		FragmentOffset: 0,
+		TTL:            48,
+		Protocol:       uint8(header.TCPProtocolNumber),
+		SrcAddr:        srcAddrV4,
+		DstAddr:        dstAddrV4,
+	})
+	ip.SetChecksum(0)
+	ip.SetChecksum(^ip.CalculateChecksum())
+
+	vv := hdr.View().ToVectorisedView()
+	return stack.NewPacketBuffer(stack.PacketBufferOptions{Data: vv})
+}
+
+func genStackUDP4(t *testing.T) (*stack.Stack, *channel.Endpoint) {
+	t.Helper()
+	s := stack.New(stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{udp.NewProtocol},
+	})
+	e := channel.New(0, header.IPv4MinimumMTU, linkAddr)
+	nicOpts := stack.NICOptions{Name: nicName}
+	if err := s.CreateNICWithOptions(nicID, e, nicOpts); err != nil {
+		t.Fatalf("CreateNICWithOptions(%d, _, %#v) = %s", nicID, nicOpts, err)
+	}
+	protocolAddr := tcpip.ProtocolAddress{
+		Protocol:          header.IPv4ProtocolNumber,
+		AddressWithPrefix: dstAddrV4.WithPrefix(),
+	}
+	if err := s.AddProtocolAddress(nicID, protocolAddr, stack.AddressProperties{}); err != nil {
+		t.Fatalf("AddProtocolAddress(%d, %+v, {}): %s", nicID, protocolAddr, err)
+	}
+	return s, e
+}
+
+func genUDP4(offset int8) *stack.PacketBuffer {
+	const payloadSize = 0
+	pktSize := header.IPv4MinimumSize + payloadSize + header.UDPMinimumSize
+	hdr := buffer.NewPrependable(pktSize)
+
+	udp := header.UDP(hdr.Prepend(payloadSize + header.UDPMinimumSize))
+	udp.Encode(&header.UDPFields{
+		SrcPort:  343,
+		DstPort:  2401,
+		Length:   header.UDPMinimumSize + uint16(offset),
+		Checksum: 0,
+	})
+
+	ip := header.IPv4(hdr.Prepend(header.IPv4MinimumSize))
+	ip.Encode(&header.IPv4Fields{
+		TOS:            0,
+		TotalLength:    uint16(pktSize),
+		ID:             1,
+		Flags:          0,
+		FragmentOffset: 0,
+		TTL:            48,
+		Protocol:       uint8(header.UDPProtocolNumber),
+		SrcAddr:        srcAddrV4,
+		DstAddr:        dstAddrV4,
+	})
+	ip.SetChecksum(0)
+	ip.SetChecksum(^ip.CalculateChecksum())
+
+	vv := hdr.View().ToVectorisedView()
+	return stack.NewPacketBuffer(stack.PacketBufferOptions{Data: vv})
 }
