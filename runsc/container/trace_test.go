@@ -23,6 +23,7 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"google.golang.org/protobuf/proto"
+	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/limits"
 	"gvisor.dev/gvisor/pkg/sentry/seccheck"
 	"gvisor.dev/gvisor/pkg/sentry/seccheck/checkers/remote/test"
@@ -304,6 +305,7 @@ func TestProcfsDump(t *testing.T) {
 	spec.Process.Rlimits = []specs.POSIXRlimit{
 		{Type: "RLIMIT_NOFILE", Hard: fdLimit.Max, Soft: fdLimit.Cur},
 	}
+	conf.Cgroupfs = true
 	_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
 	if err != nil {
 		t.Fatalf("error setting up container: %v", err)
@@ -337,8 +339,8 @@ func TestProcfsDump(t *testing.T) {
 	}
 
 	// Sleep should be PID 1.
-	if procfsDump[0].PID != 1 {
-		t.Errorf("expected sleep process to be pid 1, got %d", procfsDump[0].PID)
+	if procfsDump[0].Status.PID != 1 {
+		t.Errorf("expected sleep process to be pid 1, got %d", procfsDump[0].Status.PID)
 	}
 
 	// Check that bin/sleep is part of the executable path.
@@ -395,5 +397,37 @@ func TestProcfsDump(t *testing.T) {
 
 	if got := procfsDump[0].Limits["RLIMIT_NOFILE"]; got != fdLimit {
 		t.Errorf("expected FD limit to be %+v, but got %+v", fdLimit, got)
+	}
+
+	wantCgroup := []kernel.TaskCgroupEntry{
+		kernel.TaskCgroupEntry{HierarchyID: 2, Controllers: "memory", Path: "/"},
+		kernel.TaskCgroupEntry{HierarchyID: 1, Controllers: "cpu", Path: "/"},
+	}
+	if len(procfsDump[0].Cgroup) != len(wantCgroup) {
+		t.Errorf("expected 2 cgroup controllers, got %+v", procfsDump[0].Cgroup)
+	} else {
+		for i, cgroup := range procfsDump[0].Cgroup {
+			if cgroup != wantCgroup[i] {
+				t.Errorf("expected %+v, got %+v", wantCgroup[i], cgroup)
+			}
+		}
+	}
+
+	if wantName := "sleep"; procfsDump[0].Status.Comm != wantName {
+		t.Errorf("expected Comm to be %q, but got %q", wantName, procfsDump[0].Status.Comm)
+	}
+
+	if uid := procfsDump[0].Status.UID; uid.Real != 0 || uid.Effective != 0 || uid.Saved != 0 {
+		t.Errorf("expected UIDs to be 0 (root), got %+v", uid)
+	}
+	if gid := procfsDump[0].Status.GID; gid.Real != 0 || gid.Effective != 0 || gid.Saved != 0 {
+		t.Errorf("expected GIDs to be 0 (root), got %+v", gid)
+	}
+
+	if procfsDump[0].Status.VMSize == 0 {
+		t.Errorf("expected VMSize to be set")
+	}
+	if procfsDump[0].Status.VMRSS == 0 {
+		t.Errorf("expected VMSize to be set")
 	}
 }
