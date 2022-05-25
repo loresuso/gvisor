@@ -184,7 +184,6 @@ func (s *segment) setOwner(ep *endpoint, qFlags queueFlags) {
 
 func (s *segment) DecRef() {
 	s.segmentRefs.DecRef(func() {
-		defer s.pkt.DecRef()
 		if s.ep != nil {
 			switch s.qFlags {
 			case recvQ:
@@ -195,6 +194,8 @@ func (s *segment) DecRef() {
 				panic(fmt.Sprintf("unexpected queue flag %b set for segment", s.qFlags))
 			}
 		}
+		s.pkt.DecRef()
+		s.pkt = nil
 	})
 }
 
