@@ -20,7 +20,7 @@ import (
 	"os"
 
 	"github.com/google/subcommands"
-	"gvisor.dev/gvisor/pkg/sentry/seccheck"
+	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/cmd/util"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/container"
@@ -72,10 +72,11 @@ func (l *create) Execute(_ context.Context, f *flag.FlagSet, args ...interface{}
 	}
 	defer file.Close()
 	decoder := json.NewDecoder(file)
-	sessionConfig := &seccheck.SessionConfig{}
-	if err := decoder.Decode(sessionConfig); err != nil {
+	initConfig := &boot.InitConfig{}
+	if err := decoder.Decode(initConfig); err != nil {
 		return util.Errorf("invalid configuration file: %v", err)
 	}
+	sessionConfig := &initConfig.TraceSession
 
 	id := f.Arg(0)
 	conf := args[0].(*config.Config)

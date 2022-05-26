@@ -22,6 +22,7 @@ go_library(
         "//runsc/config",
         "//runsc/container",
         "//runsc/flag",
+        "//runsc/boot",
         "@com_github_google_subcommands//:go_default_library",
     ],
 )
